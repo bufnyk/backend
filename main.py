@@ -1,4 +1,5 @@
 import os
+import gc
 from dotenv import load_dotenv
 from supabase import create_async_client
 from fastapi import FastAPI, BackgroundTasks
@@ -112,6 +113,8 @@ async def worker(data):
                     )
                     
                     await asyncio.sleep(0.5)
+                del payload, documents, splitted_text, list_for_cohere, final_embeddings, final_list
+                gc.collect()
                 
 
             await client.post(
