@@ -113,15 +113,15 @@ async def worker(data):
             for vector, metadata in zip(final_embeddings, splitted_text):
 
                 final_list.append({"content": metadata.page_content, "metadata":metadata.metadata, "embedding": vector })
-            for i in range(0, len(final_list), 150):
+            for i in range(0, len(final_list), 100):
 
                 await (
                     sb.table("documents_view")
-                    .insert(final_list[i: i + 150])
+                    .insert(final_list[i: i + 100])
                     .execute()
                 )
                 
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(1)
             del payload, documents, splitted_text, list_for_cohere, final_embeddings, final_list
             gc.collect()
             
@@ -136,25 +136,27 @@ async def worker(data):
         )
 
     except Exception as e:
-        await asyncio.sleep(5)
+        try:
+            await asyncio.sleep(5)
+            await (
+                sb.table("documents")
+                .delete()
+                .eq("file_hash", data[0].databaseRow.hash)
+                .execute()
+            )
 
-        deletion = await (
-            sb.table("documents")
-            .delete()
-            .eq("file_hash", data[0].databaseRow.hash)
-            .execute()
-        )
-
-        async with httpx.AsyncClient() as client:
-            await client.post(
-                "https://ntnoptppvhvezqbdbcyl.supabase.co/functions/v1/document-callback",
-                headers=headers,
-                json={
-                    "document_id": data[0].databaseRow.document_id,
-                    "status": "failed",
-                    "error": str(e)
-                    }
-                )
+        except Exception as b:
+            print(f"error: {b}")
+        
+        await client.post(
+            "https://ntnoptppvhvezqbdbcyl.supabase.co/functions/v1/document-callback",
+            headers=headers,
+            json={
+                "document_id": data[0].databaseRow.document_id,
+                "status": "failed",
+                "error": str(e)
+                }
+            )
 
         
 

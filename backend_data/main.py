@@ -140,7 +140,7 @@ async def worker(data):
         else:
             exluded_urls = globs(data.website_url, data.excluded_paths)
             r = await client.post(
-                f"https://api.apify.com/v2/acts/apify~website-content-crawler/runs?token={APIFY}&build=0.3.82&memory=16384&webhooks=W3siZXZlbnRUeXBlcyI6WyJBQ1RPUi5SVU4uU1VDQ0VFREVEIl0sInJlcXVlc3RVcmwiOiJodHRwczovL244bi52ZWN0aXhhaS5jb20vd2ViaG9vay84MjQ0YWQxMy1kMjk3LTQ0MmUtODM3NS1iYTg0ODhjN2ViZDgifV0=",
+                f"https://api.apify.com/v2/acts/apify~website-content-crawler/runs?token={APIFY}&build=0.3.82&memory=8192&webhooks=W3siZXZlbnRUeXBlcyI6WyJBQ1RPUi5SVU4uU1VDQ0VFREVEIl0sInJlcXVlc3RVcmwiOiJodHRwczovL244bi52ZWN0aXhhaS5jb20vd2ViaG9vay84MjQ0YWQxMy1kMjk3LTQ0MmUtODM3NS1iYTg0ODhjN2ViZDgifV0=",
                 json={
                     "aggressivePrune": False,
                     "blockMedia": True,
