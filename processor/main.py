@@ -1,5 +1,4 @@
 import os
-import gc
 from dotenv import load_dotenv
 from supabase import create_async_client
 from fastapi import FastAPI, BackgroundTasks
@@ -9,6 +8,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 import asyncio
 import httpx
 import cohere 
+import traceback
 from contextlib import asynccontextmanager
 
 class Row(BaseModel):
@@ -30,7 +30,7 @@ class Payload(BaseModel):
 
 text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
 load_dotenv()
-CALLBACK_SECRET = os.getenvb("CALLBACK_SECRET")
+CALLBACK_SECRET = os.getenv("CALLBACK_SECRET")
 COHERE_API_KEY = os.getenv("COHERE_API_KEY")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -123,7 +123,7 @@ async def worker(data):
                 
                 await asyncio.sleep(1)
             del payload, documents, splitted_text, list_for_cohere, final_embeddings, final_list
-            gc.collect()
+    
             
 
         await client.post(
@@ -136,6 +136,9 @@ async def worker(data):
         )
 
     except Exception as e:
+
+        asyncio.create_task(logger(str(e), traceback.format_exc()))
+        
         try:
             await asyncio.sleep(5)
             await (
@@ -157,7 +160,19 @@ async def worker(data):
                 "error": str(e)
                 }
             )
-
+        
+async def logger(error_string, traceback_string):
+    try:
+        await client.post(
+            "https://vectixai.com/log-error",
+            json={
+                "app_name": "data_processor",
+                "error_message": error_string,
+                "traceback": traceback_string,
+            }
+        )
+    except Exception as e:
+        print(f"could not log the error {str(e)}")
         
 
     
