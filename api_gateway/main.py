@@ -20,7 +20,7 @@ async def lifespan(app: FastAPI):
     global redis_client
 
     httpx_client = httpx.AsyncClient()
-    redis_client = redis.Redis(host="redis_container", port=6379, db=0)
+    redis_client = redis.Redis(host="redis_db", port=6379, db=0)
 
     yield
 
@@ -29,7 +29,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-@app.route("/{service}", methods=["GET", "POST", "PUT", "DELETE"])
+@app.api_route("/{service}", methods=["GET", "POST", "PUT", "DELETE"])
 async def main(service: str, request: Request):
     if service not in services:
         raise HTTPException(status_code=404, detail="Service not found")

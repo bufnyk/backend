@@ -81,9 +81,9 @@ services:
     env_file:
       - .env
 
-  error_handler_service:
+  log_error_service:
     build: ./error_handler
-    container_name: error_handler
+    container_name: log-error_container
     restart: unless-stopped
     expose:
       - "8000"
