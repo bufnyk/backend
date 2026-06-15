@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+pydantic
+supabase
+langchain-core
+langchain-text-splitters
+httpx
+cohere
+python-dotenv

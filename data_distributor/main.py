@@ -315,7 +315,7 @@ async def worker(data: Payload):
 async def logger(error_string, traceback_string):
     try:
         await client.post(
-            "https://vectixai.com/log-error",
+            "http://log-error_container:8000",
             json={
                 "app_name": "data_distributor",
                 "error_message": error_string,

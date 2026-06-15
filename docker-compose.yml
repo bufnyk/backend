@@ -1,0 +1,91 @@
+volumes:
+  caddy_data:
+  caddy_config:
+  redis_data:
+
+services:
+  caddy:
+    image: caddy:alpine
+    container_name: caddy_edge
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile 
+      - caddy_data:/data     
+      - caddy_config:/config
+    depends_on:
+      api_gateway:
+        condition: service_started
+
+  redis_db:
+    image: redis:7-alpine
+    container_name: core_redis
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    expose:
+      - "6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  api_gateway:
+    build: ./api_gateway
+    container_name: api_gateway
+    restart: unless-stopped
+    expose:
+      - "8000"
+    env_file:
+      - .env
+    depends_on:
+      redis_db:
+        condition: service_healthy  
+
+  chatbot_service:
+    build: ./chatbot
+    container_name: chatbot
+    restart: unless-stopped
+    expose:
+      - "8000"
+    env_file:
+      - .env
+
+  data_distributor_service:
+    build: ./data_distributor
+    container_name: data_distributor
+    restart: unless-stopped
+    expose:
+      - "8000"
+    env_file:
+      - .env
+
+  processor_service:
+    build: ./processor
+    container_name: processor
+    restart: unless-stopped
+    expose:
+      - "8000"
+    env_file:
+      - .env
+
+  prompt_rewrite_service:
+    build: ./prompt_rewrite
+    container_name: prompt_rewrite
+    restart: unless-stopped
+    expose:
+      - "8000"
+    env_file:
+      - .env
+
+  error_handler_service:
+    build: ./error_handler
+    container_name: error_handler
+    restart: unless-stopped
+    expose:
+      - "8000"
+    env_file:
+      - .env

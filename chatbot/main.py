@@ -128,7 +128,7 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    await httpx_client.close()
+    await httpx_client.aclose()
     await db_pool.close()
 
 async def get_connection():
@@ -395,7 +395,7 @@ async def copilot_response(data: Copilot, connection = Depends(get_connection)):
 async def logger(error_string, traceback_string):
     try:
         await httpx_client.post(
-            "https://vectixai.com/log-error",
+            "http://log-error_container:8000",
             json={
                 "app_name": "chatbot",
                 "error_message": error_string,

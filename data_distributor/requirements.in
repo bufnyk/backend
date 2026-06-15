@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+pydantic
+asyncpg
+httpx
+pymupdf
+pytesseract
+pillow
+python-dotenv
+python-docx
+langchain-text-splitters
+cohere
+supabase

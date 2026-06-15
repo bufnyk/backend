@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+pydantic
+tenacity
+asyncpg
+httpx
+python-dotenv
+cohere
+google-genai
