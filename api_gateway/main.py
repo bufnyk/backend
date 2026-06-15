@@ -4,12 +4,12 @@ import httpx
 import redis.asyncio as redis
 
 services = {
-    "chatbot": "http://chatbot_container:8000",
-    "copilot": "http://chatbot_container:8000",
-    "test_chatbot": "http://chatbot_container:8000",
-    "loader": "http://processor_container:8000",
-    "document": "http://data_distributor_container:8000",
-    "feedback": "http://prompt_rewrite_container:8000",
+    "chatbot": "http://chatbot:8000",
+    "copilot": "http://chatbot:8000",
+    "test_chatbot": "http://chatbot:8000",
+    "loader": "http://processor:8000",
+    "document": "http://data_distributor:8000",
+    "feedback": "http://prompt_rewrite:8000",
 }
 httpx_client = None
 redis_client = None
@@ -44,7 +44,7 @@ async def main(service: str, request: Request):
                 url=f"{services[service]}/{service}",
                 content=body,
                 headers=headers,
-                params=request.url.query
+                params=request.query_params
             )
             return Response(
                 content=service_response.content,
