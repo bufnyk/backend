@@ -9,7 +9,7 @@ from PIL import Image
 import io
 import os
 from dotenv import load_dotenv
-from functions import globs
+from vectix.backend.data_distributor.functions import globs
 import docx
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 import cohere

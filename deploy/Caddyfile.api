@@ -1,0 +1,5 @@
+# BEGIN VECTIX API (managed by backend deployment)
+api.vectixai.com {
+    reverse_proxy api_gateway:8000
+}
+# END VECTIX API (managed by backend deployment)

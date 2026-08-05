@@ -1,7 +1,7 @@
 import pytest
 from fastapi.testclient import TestClient
 import httpx
-from main import app, worker, Payload
+from vectix.backend.data_distributor.main import app, worker, Payload
 
 @pytest.fixture
 def client(mocker):

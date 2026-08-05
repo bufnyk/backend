@@ -1,5 +1,5 @@
 import pytest
-from main import send_to_telegram
+from vectix.backend.error_handler.main import send_to_telegram
 
 @pytest.mark.asyncio
 async def test_sender():

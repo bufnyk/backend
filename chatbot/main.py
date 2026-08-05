@@ -12,6 +12,7 @@ import cohere
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 import json
+from urllib.parse import urlparse
 from google import genai
 from google.genai import types 
 
@@ -24,12 +25,37 @@ co = None
 client = None
 httpx_client = None
 
+MAX_CHAT_FILE_SIZE = 10 * 1024 * 1024
+ALLOWED_CHAT_FILE_TYPES = {
+    "image/jpeg",
+    "image/png",
+    "image/gif",
+    "image/webp",
+    "application/pdf",
+}
+ALLOWED_CHAT_FILE_HOSTS = {
+    host.strip().lower()
+    for host in os.getenv(
+        "CHAT_FILE_ALLOWED_HOSTS",
+        "ntnoptppvhvezqbdbcyl.supabase.co",
+    ).split(",")
+    if host.strip()
+}
+
+
+class FileAttachment(BaseModel):
+    name: str
+    size: int
+    type: str
+    url: str
+
 class Chatbot(BaseModel):
     company_name: str
     message: str
     conversation_history: list[dict]
     language: str
     conversationId: str
+    file_attachments: list[FileAttachment] | None = None
 
 class Test_Chatbot(BaseModel):
     user_id: str
@@ -136,6 +162,34 @@ async def get_connection():
         yield connection
 
 
+async def create_file_part(attachment: FileAttachment):
+    if attachment.type not in ALLOWED_CHAT_FILE_TYPES:
+        raise ValueError(f"Unsupported chat attachment type: {attachment.type}")
+    if attachment.size < 0 or attachment.size > MAX_CHAT_FILE_SIZE:
+        raise ValueError(f"Invalid chat attachment size: {attachment.size}")
+
+    parsed_url = urlparse(attachment.url)
+    if parsed_url.scheme != "https" or (parsed_url.hostname or "").lower() not in ALLOWED_CHAT_FILE_HOSTS:
+        raise ValueError("Chat attachment URL is not allowed")
+    if httpx_client is None:
+        raise RuntimeError("HTTP client is not initialized")
+
+    file_content = bytearray()
+    async with httpx_client.stream("GET", attachment.url, follow_redirects=False) as response:
+        response.raise_for_status()
+
+        content_length = response.headers.get("content-length")
+        if content_length and int(content_length) > MAX_CHAT_FILE_SIZE:
+            raise ValueError("Chat attachment exceeds the maximum size")
+
+        async for chunk in response.aiter_bytes():
+            file_content.extend(chunk)
+            if len(file_content) > MAX_CHAT_FILE_SIZE:
+                raise ValueError("Chat attachment exceeds the maximum size")
+
+    return types.Part.from_bytes(data=bytes(file_content), mime_type=attachment.type)
+
+
 app = FastAPI(lifespan=lifespan)
 #async def prompt_creator(prompt_type, company_context, persona, instructions, hard_rules, chat_setings)
 @app.post("/chatbot")
@@ -204,7 +258,12 @@ async def chatbot_response(data: Chatbot, connection = Depends(get_connection)):
             config=config
         )
 
-        response = await chat.send_message(client_input)
+        current_message = [types.Part.from_text(text=client_input)]
+        current_message.extend([
+            await create_file_part(attachment)
+            for attachment in data.file_attachments or []
+        ])
+        response = await chat.send_message(current_message)
 
         max_iter = 5
         start = 0

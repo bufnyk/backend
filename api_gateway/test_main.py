@@ -1,93 +1,133 @@
-import pytest
-from fastapi.testclient import TestClient
+from unittest.mock import AsyncMock
+import json
+
 import httpx
-from main import app  
+import pytest
+import pytest_asyncio
+
+from vectix.backend.api_gateway import main as gateway
+
+
+@pytest_asyncio.fixture
+async def client():
+    transport = httpx.ASGITransport(app=gateway.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as test_client:
+        yield test_client
+
 
 @pytest.fixture
-def client():
-    """
-    KRYTYCZNE: Użycie bloku 'with' zmusza FastAPI do uruchomienia funkcji 'lifespan'.
-    Bez tego 'with', zmienne globalne (redis_client, httpx_client) pozostałyby jako None.
-    """
-    with TestClient(app) as c:
-        yield c
+def mock_redis(monkeypatch):
+    redis_client = AsyncMock()
+    redis_client.incr.return_value = 1
+    redis_client.expire.return_value = True
+    redis_client.ping.return_value = True
+    monkeypatch.setattr(gateway, "redis_client", redis_client)
+    return redis_client
+
 
 @pytest.fixture
-def mock_redis(mocker):
-    """
-    Blokujemy wyjście do prawdziwego Redisa upewniając się, że mock jest asynchroniczny.
-    """
-    mocker.patch("redis.asyncio.Redis.incr", new_callable=mocker.AsyncMock, return_value=1)
-    mocker.patch("redis.asyncio.Redis.expire", new_callable=mocker.AsyncMock, return_value=True)
+def mock_httpx_success(monkeypatch):
+    upstream_response = httpx.Response(
+        status_code=200,
+        json={"message": "Hello from mock service"},
+        request=httpx.Request("POST", "http://chatbot:8000/chatbot"),
+    )
+    http_client = AsyncMock()
+    http_client.request.return_value = upstream_response
+    monkeypatch.setattr(gateway, "httpx_client", http_client)
+    return http_client.request
 
-@pytest.fixture
-def mock_httpx_success(mocker):
-    """
-    Udajemy, że wewnętrzny mikroserwis (np. Chatbot) odpowiada prawidłowo (200 OK).
-    """
-    mock_response = mocker.Mock()
-    mock_response.status_code = 200
-    mock_response.content = b'{"message": "Hello from mock service"}'
-    mock_response.headers = {"content-type": "application/json"}
-    
-    return mocker.patch("httpx.AsyncClient.request", return_value=mock_response)
 
-def test_service_not_found(client):
-    """
-    Test 1: Sprawdzamy, czy Gateway blokuje zapytania do nieznanych usług.
-    Nie potrzebujemy tu mockować Redisa, bo kod odrzuca request wcześniej.
-    """
-    response = client.get("/nieistniejacy_serwis")
-    
+@pytest.mark.asyncio
+async def test_service_not_found(client):
+    response = await client.get("/nieistniejacy_serwis")
+
     assert response.status_code == 404
     assert response.json() == {"detail": "Service not found"}
 
 
-def test_successful_proxy_request(client, mock_redis, mock_httpx_success):
-    """
-    Test 2: Sprawdzamy optymalną ścieżkę (Happy Path).
-    Wysyłamy POST do /chatbot i oczekujemy, że Gateway przepuści to dalej.
-    """
-    payload = {"user_id": "user123", "message": "Test"}
-    
-    response = client.post("/chatbot", json=payload)
-    
+@pytest.mark.asyncio
+async def test_successful_proxy_request(client, mock_redis, mock_httpx_success):
+    payload = {
+        "user_id": "user123",
+        "message": "Test",
+        "file_attachments": [
+            {
+                "name": "sample.pdf",
+                "size": 123,
+                "type": "application/pdf",
+                "url": "https://example.com/sample.pdf",
+            }
+        ],
+    }
+
+    response = await client.post("/chatbot", json=payload)
+
     assert response.status_code == 200
     assert response.json() == {"message": "Hello from mock service"}
-    
-    mock_httpx_success.assert_called_once()
-    args, kwargs = mock_httpx_success.call_args
+
+    mock_httpx_success.assert_awaited_once()
+    _, kwargs = mock_httpx_success.call_args
     assert kwargs["url"] == "http://chatbot:8000/chatbot"
     assert kwargs["method"] == "POST"
+    assert json.loads(kwargs["content"]) == payload
 
 
-def test_rate_limit_exceeded(client, mocker):
-    """
-    Test 3: Symulujemy atak DDoS lub przekroczenie limitu przez użytkownika.
-    """
-    mocker.patch("redis.asyncio.Redis.incr", new_callable=mocker.AsyncMock, return_value=21)
-    mocker.patch("redis.asyncio.Redis.expire", new_callable=mocker.AsyncMock, return_value=True)
-    
-    payload = {"user_id": "spammer123"}
-    response = client.post("/chatbot", json=payload)
-    
+@pytest.mark.asyncio
+async def test_rate_limit_exceeded(client, mock_redis, monkeypatch):
+    mock_redis.incr.return_value = 21
+    monkeypatch.setattr(gateway, "httpx_client", AsyncMock())
+
+    response = await client.post("/chatbot", json={"user_id": "spammer123"})
+
     assert response.status_code == 429
     assert response.json() == {"detail": "Too many Requests"}
 
 
-def test_microservice_down(client, mock_redis, mocker):
-    """
-    Test 4: Inżynieria Niezawodności. Sprawdzamy, co zrobi Gateway, 
-    gdy mikroserwis wewnątrz Dockera umrze (np. rzuci błędem połączenia).
-    """
+@pytest.mark.asyncio
+async def test_microservice_down(client, mock_redis, monkeypatch):
     fake_request = httpx.Request(method="POST", url="http://chatbot:8000/chatbot")
-    mocker.patch(
-        "httpx.AsyncClient.request", 
-        side_effect=httpx.RequestError("Connection failed", request=fake_request)
-    )
-    
-    payload = {"user_id": "user123"}
-    response = client.post("/chatbot", json=payload)
-    
+    http_client = AsyncMock()
+    http_client.request.side_effect = httpx.RequestError("Connection failed", request=fake_request)
+    monkeypatch.setattr(gateway, "httpx_client", http_client)
+
+    response = await client.post("/chatbot", json={"user_id": "user123"})
+
     assert response.status_code == 503
-    assert response.json() == {"detail": "Service Temporarly Unavailable"}
+    assert response.json() == {"detail": "Service temporarily unavailable"}
+
+
+@pytest.mark.asyncio
+async def test_proxy_preserves_subpath_and_query(client, mock_redis, mock_httpx_success):
+    response = await client.patch("/chatbot/messages/123?include=files", json={"message": "Test"})
+
+    assert response.status_code == 200
+    _, kwargs = mock_httpx_success.call_args
+    assert kwargs["url"] == "http://chatbot:8000/chatbot/messages/123"
+    assert str(kwargs["params"]) == "include=files"
+    assert kwargs["method"] == "PATCH"
+
+
+@pytest.mark.asyncio
+async def test_cors_preflight_is_handled_by_gateway(client):
+    response = await client.options(
+        "/chatbot",
+        headers={
+            "Origin": "https://customer.example",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "*"
+    assert "POST" in response.headers["access-control-allow-methods"]
+
+
+@pytest.mark.asyncio
+async def test_health_checks_redis(client, mock_redis):
+    response = await client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+    mock_redis.ping.assert_awaited_once()

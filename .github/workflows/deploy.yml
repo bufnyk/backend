@@ -1,0 +1,74 @@
+name: Deploy backend to Hetzner
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-deployment
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy production
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 30
+    env:
+      SSH_HOST: ${{ secrets.HETZNER_HOST }}
+      SSH_PORT: ${{ vars.HETZNER_SSH_PORT || '22' }}
+      REMOTE: root@${{ secrets.HETZNER_HOST }}
+      REMOTE_BACKEND_DIR: /root/n8n-docker/backend
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Configure SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.HETZNER_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.HETZNER_KNOWN_HOSTS }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$SSH_HOST"
+          test -n "$SSH_PRIVATE_KEY"
+          test -n "$SSH_KNOWN_HOSTS"
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Synchronize backend files
+        run: |
+          set -Eeuo pipefail
+          ssh -p "$SSH_PORT" "$REMOTE" "install -d -m 700 '$REMOTE_BACKEND_DIR'"
+          rsync -az --delete \
+            --exclude='.env' \
+            --exclude='.git/' \
+            --exclude='venv/' \
+            --exclude='__pycache__/' \
+            --exclude='.pytest_cache/' \
+            -e "ssh -p $SSH_PORT" \
+            ./ "$REMOTE:$REMOTE_BACKEND_DIR/"
+
+      - name: Install production environment
+        env:
+          BACKEND_ENV_FILE: ${{ secrets.BACKEND_ENV_FILE }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$BACKEND_ENV_FILE"
+          printf '%s' "$BACKEND_ENV_FILE" | \
+            ssh -p "$SSH_PORT" "$REMOTE" \
+              "umask 077; cat > '$REMOTE_BACKEND_DIR/.env'"
+
+      - name: Build and deploy services
+        run: |
+          set -Eeuo pipefail
+          ssh -p "$SSH_PORT" "$REMOTE" \
+            "cd '$REMOTE_BACKEND_DIR' && DEPLOY_ROOT=/root/n8n-docker bash deploy/deploy.sh"
