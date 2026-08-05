@@ -20,6 +20,8 @@ load_dotenv()
 PSTG_URL = os.getenv("PSTG_URL")
 COHERE_API_KEY = os.getenv("COHERE_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+DB_POOL_MIN_SIZE = int(os.getenv("DB_POOL_MIN_SIZE", "1"))
+DB_POOL_MAX_SIZE = int(os.getenv("DB_POOL_MAX_SIZE", "2"))
 db_pool = None
 co = None
 client = None
@@ -147,7 +149,11 @@ async def lifespan(app: FastAPI):
     global client
     global httpx_client
 
-    db_pool = await asyncpg.create_pool(PSTG_URL)
+    db_pool = await asyncpg.create_pool(
+        PSTG_URL,
+        min_size=DB_POOL_MIN_SIZE,
+        max_size=DB_POOL_MAX_SIZE,
+    )
     co = cohere.AsyncClient(api_key=COHERE_API_KEY)
     client = genai.Client(api_key=GEMINI_API_KEY)
     httpx_client = httpx.AsyncClient()

@@ -10,6 +10,8 @@ from openrouter import OpenRouter
 load_dotenv()
 PSTG_URL = os.getenv("PSTG_URL")
 OPEN_ROUTER = os.getenv("OPEN_ROUTER")
+DB_POOL_MIN_SIZE = int(os.getenv("DB_POOL_MIN_SIZE", "1"))
+DB_POOL_MAX_SIZE = int(os.getenv("DB_POOL_MAX_SIZE", "2"))
 
 
 db_pool = None
@@ -30,7 +32,11 @@ class Payload(BaseModel):
 async def lifespan(app: FastAPI):
     global db_pool
 
-    db_pool = await asyncpg.create_pool(PSTG_URL)
+    db_pool = await asyncpg.create_pool(
+        PSTG_URL,
+        min_size=DB_POOL_MIN_SIZE,
+        max_size=DB_POOL_MAX_SIZE,
+    )
     
     yield
 
@@ -214,4 +220,3 @@ async def main(data: Payload, connection = Depends(get_connection)):
 
     
   
-

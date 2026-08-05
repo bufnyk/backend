@@ -59,6 +59,8 @@ services:
     restart: unless-stopped
     environment:
       PSTG_URL: ${PSTG_URL:?PSTG_URL is required}
+      DB_POOL_MIN_SIZE: ${DB_POOL_MIN_SIZE:-1}
+      DB_POOL_MAX_SIZE: ${DB_POOL_MAX_SIZE:-2}
       COHERE_API_KEY: ${COHERE_API_KEY:?COHERE_API_KEY is required}
       GEMINI_API_KEY: ${GEMINI_API_KEY:?GEMINI_API_KEY is required}
       CHAT_FILE_ALLOWED_HOSTS: ${CHAT_FILE_ALLOWED_HOSTS:-ntnoptppvhvezqbdbcyl.supabase.co}
@@ -72,6 +74,8 @@ services:
     restart: unless-stopped
     environment:
       PSTG_URL: ${PSTG_URL:?PSTG_URL is required}
+      DB_POOL_MIN_SIZE: ${DB_POOL_MIN_SIZE:-1}
+      DB_POOL_MAX_SIZE: ${DB_POOL_MAX_SIZE:-2}
       APIFY: ${APIFY:?APIFY is required}
       CALLBACK_SECRET: ${CALLBACK_SECRET:?CALLBACK_SECRET is required}
       COHERE_API_KEY: ${COHERE_API_KEY:?COHERE_API_KEY is required}
@@ -102,6 +106,8 @@ services:
     restart: unless-stopped
     environment:
       PSTG_URL: ${PSTG_URL:?PSTG_URL is required}
+      DB_POOL_MIN_SIZE: ${DB_POOL_MIN_SIZE:-1}
+      DB_POOL_MAX_SIZE: ${DB_POOL_MAX_SIZE:-2}
       OPEN_ROUTER: ${OPEN_ROUTER:?OPEN_ROUTER is required}
     healthcheck: *app-healthcheck
     mem_limit: 512m

@@ -27,6 +27,8 @@ CALLBACK_SECRET = os.getenv("CALLBACK_SECRET")
 COHERE_API_KEY = os.getenv("COHERE_API_KEY")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
+DB_POOL_MIN_SIZE = int(os.getenv("DB_POOL_MIN_SIZE", "1"))
+DB_POOL_MAX_SIZE = int(os.getenv("DB_POOL_MAX_SIZE", "2"))
 headers = {
     "Content-Type": "application/json",
     "X-Callback-Secret": CALLBACK_SECRET
@@ -66,7 +68,11 @@ async def lifespan(app: FastAPI):
     client = httpx.AsyncClient()
     co = cohere.AsyncClient(api_key=COHERE_API_KEY)
     sb = create_async_client(SUPABASE_URL, SUPABASE_KEY)
-    db_pool = await asyncpg.create_pool(PSTG_URL)
+    db_pool = await asyncpg.create_pool(
+        PSTG_URL,
+        min_size=DB_POOL_MIN_SIZE,
+        max_size=DB_POOL_MAX_SIZE,
+    )
 
     yield
 
