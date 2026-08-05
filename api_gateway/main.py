@@ -33,7 +33,7 @@ async def lifespan(app: FastAPI):
     global httpx_client
     global redis_client
 
-    httpx_client = httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=5.0))
+    httpx_client = httpx.AsyncClient(timeout=httpx.Timeout(100.0, connect=5.0))
     redis_client = redis.Redis(host="redis_db", port=6379, db=0)
 
     yield
