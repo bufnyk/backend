@@ -18,3 +18,5 @@ Configure a GitHub `production` environment with these secrets:
 
 Optionally set the environment variable `HETZNER_SSH_PORT`; it defaults to `22`.
 The workflow runs after every push to `main` and can also be started manually.
+To start it manually, open **Actions → Deploy backend to Hetzner → Run workflow**.
+The manual run includes an optional `no_cache` switch for a clean Docker rebuild.

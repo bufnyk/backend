@@ -5,6 +5,12 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      no_cache:
+        description: Rebuild all backend images without Docker cache
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -24,6 +30,7 @@ jobs:
       SSH_PORT: ${{ vars.HETZNER_SSH_PORT || '22' }}
       REMOTE: root@${{ secrets.HETZNER_HOST }}
       REMOTE_BACKEND_DIR: /root/n8n-docker/backend
+      NO_CACHE: ${{ github.event_name == 'workflow_dispatch' && inputs.no_cache || false }}
 
     steps:
       - name: Check out repository
@@ -71,4 +78,4 @@ jobs:
         run: |
           set -Eeuo pipefail
           ssh -p "$SSH_PORT" "$REMOTE" \
-            "cd '$REMOTE_BACKEND_DIR' && DEPLOY_ROOT=/root/n8n-docker bash deploy/deploy.sh"
+            "cd '$REMOTE_BACKEND_DIR' && DEPLOY_ROOT=/root/n8n-docker NO_CACHE='$NO_CACHE' bash deploy/deploy.sh"
