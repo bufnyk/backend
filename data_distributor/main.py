@@ -67,7 +67,7 @@ async def lifespan(app: FastAPI):
 
     client = httpx.AsyncClient()
     co = cohere.AsyncClient(api_key=COHERE_API_KEY)
-    sb = create_async_client(SUPABASE_URL, SUPABASE_KEY)
+    sb = await create_async_client(SUPABASE_URL, SUPABASE_KEY)
     db_pool = await asyncpg.create_pool(
         PSTG_URL,
         min_size=DB_POOL_MIN_SIZE,
