@@ -478,7 +478,7 @@ async def chatbot_response(data: Chatbot, connection = Depends(get_connection)):
             
         )
         chat = client.aio.chats.create(
-            model="gemini-2.5-flash",
+            model="gemini-3.8-flash",
             config=config
         )
 
@@ -554,7 +554,7 @@ async def test_chatbot_response(data: Test_Chatbot, connection = Depends(get_con
             system_instruction=system_prompt,
         )
         chat = client.aio.chats.create(
-            model="gemini-2.5-flash",
+            model="gemini-3.8-flash",
             config=config
         )
         response = await chat.send_message(client_input)
@@ -639,7 +639,7 @@ async def copilot_response(data: Copilot, connection = Depends(get_connection)):
             system_instruction=system_prompt
         )
         chat = client.aio.chats.create(
-            model="gemini-3.5-flash",
+            model="gemini-3.8-flash",
             config=config
         )
 
