@@ -179,7 +179,6 @@ async def main(data: Payload, connection = Depends(get_connection)):
                             "content": user_input,
                         }
                     ],
-                    temperature=0.2,
                 )
     
     try:

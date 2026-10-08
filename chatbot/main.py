@@ -473,7 +473,6 @@ async def chatbot_response(data: Chatbot, connection = Depends(get_connection)):
 
         config = types.GenerateContentConfig(
             tools=[knowledge_base, human_handoff, not_resolved],
-            temperature=float(db_config['temp']),
             system_instruction=system_prompt,
             
         )
@@ -550,7 +549,6 @@ async def test_chatbot_response(data: Test_Chatbot, connection = Depends(get_con
         '''
         config = types.GenerateContentConfig(
             tools=[knowledge_base],
-            temperature=float(db_config['temp']),
             system_instruction=system_prompt,
         )
         chat = client.aio.chats.create(
@@ -635,7 +633,6 @@ async def copilot_response(data: Copilot, connection = Depends(get_connection)):
 
         config = types.GenerateContentConfig(
             tools=[knowledge_base],
-            temperature=0.3,
             system_instruction=system_prompt
         )
         chat = client.aio.chats.create(
