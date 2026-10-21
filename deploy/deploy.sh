@@ -8,6 +8,12 @@ env_file="${backend_dir}/.env"
 project_name="vectix-backend"
 no_cache="${NO_CACHE:-false}"
 
+exec 9>"${TMPDIR:-/tmp}/vectix-backend.deploy.lock"
+if ! flock -n 9; then
+  echo "Another Vectix backend deployment is already running" >&2
+  exit 1
+fi
+
 if [[ ! -f "$env_file" ]]; then
   echo "Missing backend environment file: $env_file" >&2
   exit 1
@@ -24,11 +30,14 @@ compose=(docker compose --project-name "$project_name" -f "$compose_file")
 
 if [[ "$no_cache" == "true" ]]; then
   "${compose[@]}" build --no-cache
-  "${compose[@]}" up --detach --wait --wait-timeout 180
+  "${compose[@]}" up --detach --remove-orphans --wait --wait-timeout 180
 else
-  "${compose[@]}" up --detach --build --wait --wait-timeout 180
+  "${compose[@]}" up --detach --build --remove-orphans --wait --wait-timeout 180
 fi
 
 bash "${backend_dir}/deploy/update-caddy.sh" "$deploy_root"
+
+curl --fail --silent --show-error --max-time 15 https://api.vectixai.com/health
+bash "${backend_dir}/deploy/retire-legacy.sh" "$backend_dir"
 
 "${compose[@]}" ps

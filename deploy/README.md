@@ -3,11 +3,20 @@
 The backend is deployed as a separate Compose project under
 `/root/n8n-docker/backend`. It joins the existing external `caddy_net` network;
 it does not recreate or restart the existing n8n, PostgreSQL, or Caddy services.
+The Compose file pins the project name to `vectix-backend`, including manual
+`docker compose up` runs. Caddy uses the unique `vectix-backend-api` network
+alias rather than the shared `api_gateway` service name.
 
 The deployment updates only the marked `api.vectixai.com` block in the host
 `/root/n8n-docker/Caddyfile`. Before a graceful Caddy reload it creates a backup
 and validates the complete configuration. A failed validation or reload restores
 the previous file.
+
+After all new services are healthy, deployment checks the upstream from Caddy's
+network, reloads the route, and verifies the public `/health` endpoint. It then
+stops and removes containers from the legacy `backend` project only when their
+service and working-directory labels match this installation. Persistent
+volumes are retained. A deployment lock prevents concurrent manual and CI runs.
 
 Configure a GitHub `production` environment with these secrets:
 
@@ -15,6 +24,9 @@ Configure a GitHub `production` environment with these secrets:
 - `HETZNER_SSH_PRIVATE_KEY`: private key accepted by the server for `root`.
 - `HETZNER_KNOWN_HOSTS`: verified `known_hosts` entry for the server.
 - `BACKEND_ENV_FILE`: complete production `.env` content based on `env_example`.
+
+Single-quote literal values containing `$` in `BACKEND_ENV_FILE` and `.env` so
+Compose does not substitute parts of a secret as environment variables.
 
 Optionally set the environment variable `HETZNER_SSH_PORT`; it defaults to `22`.
 The workflow runs after every push to `main` and can also be started manually.

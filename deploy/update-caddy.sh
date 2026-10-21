@@ -15,6 +15,10 @@ for required_file in "$caddyfile" "$host_compose" "$snippet"; do
   fi
 done
 
+# Verify the unique upstream from Caddy's own network before switching traffic.
+docker compose -f "$host_compose" exec -T caddy \
+  wget -q -O /dev/null http://vectix-backend-api:8000/health
+
 begin_count="$(grep -Fxc "$begin_marker" "$caddyfile" || true)"
 end_count="$(grep -Fxc "$end_marker" "$caddyfile" || true)"
 if [[ "$begin_count" != "$end_count" || "$begin_count" -gt 1 ]]; then

@@ -2,6 +2,7 @@ PSTG_URL=
 DB_POOL_MIN_SIZE=1
 DB_POOL_MAX_SIZE=2
 APIFY=
+# Single-quote literal secrets containing $, e.g. CALLBACK_SECRET='literal$value'.
 CALLBACK_SECRET=
 COHERE_API_KEY=
 SUPABASE_URL=

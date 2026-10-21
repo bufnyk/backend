@@ -1,3 +1,5 @@
+name: vectix-backend
+
 volumes:
   redis_data:
 
@@ -51,8 +53,10 @@ services:
       start_period: 10s
     mem_limit: 256m
     networks:
-      - backend_net
-      - caddy_net
+      backend_net:
+      caddy_net:
+        aliases:
+          - vectix-backend-api
 
   chatbot:
     build: ./chatbot
