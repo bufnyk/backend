@@ -20,3 +20,16 @@ Optionally set the environment variable `HETZNER_SSH_PORT`; it defaults to `22`.
 The workflow runs after every push to `main` and can also be started manually.
 To start it manually, open **Actions → Deploy backend to Hetzner → Run workflow**.
 The manual run includes an optional `no_cache` switch for a clean Docker rebuild.
+
+The chatbot service requires `OPENAI_API_KEY` in addition to `GEMINI_API_KEY`.
+Keep both keys in the production `BACKEND_ENV_FILE` secret. `/chatbot`,
+`/test_chatbot`, and `/copilot` use OpenAI `gpt-6-luna` through the Responses API,
+with `gemini-3.8-flash` as fallback. OpenAI requests use `store=false` and low
+reasoning effort. The primary model has a 35-second budget; the complete chat
+handler has a 90-second budget, below the gateway's 100-second upstream timeout.
+Selected attachments are downloaded once and reused on fallback. Tool results
+are retained across providers to avoid repeating handoffs or unresolved flags.
+
+Run chatbot regression tests from `chatbot/` with
+`venv/bin/python -m unittest discover -v`. The tests mock network and database
+access; no API keys are required.

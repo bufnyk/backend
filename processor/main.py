@@ -50,7 +50,7 @@ async def lifespan(app: FastAPI):
 
     co = cohere.AsyncClient(api_key=COHERE_API_KEY)
     client = httpx.AsyncClient()
-    sb = create_async_client(SUPABASE_URL, SUPABASE_KEY)
+    sb = await create_async_client(SUPABASE_URL, SUPABASE_KEY)
 
     yield 
 
@@ -164,7 +164,7 @@ async def worker(data):
 async def logger(error_string, traceback_string):
     try:
         await client.post(
-            "http://log-error_container:8000",
+            "http://log-error_container:8000/log-error",
             json={
                 "app_name": "data_processor",
                 "error_message": error_string,
@@ -173,6 +173,3 @@ async def logger(error_string, traceback_string):
         )
     except Exception as e:
         print(f"could not log the error {str(e)}")
-        
-
-    

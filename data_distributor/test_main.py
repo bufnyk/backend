@@ -1,16 +1,13 @@
 import pytest
-from fastapi.testclient import TestClient
 import httpx
-from vectix.backend.data_distributor.main import app, worker, Payload
+import pytest_asyncio
+import main
 
-@pytest.fixture
-def client(mocker):
+app, worker, Payload = main.app, main.worker, main.Payload
 
-    mocker.patch("asyncpg.create_pool", new_callable=mocker.AsyncMock)
-    mocker.patch("main.create_async_client")
-    mocker.patch("cohere.AsyncClient")
-
-    with TestClient(app) as client:
+@pytest_asyncio.fixture
+async def client():
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
         yield client
 
 @pytest.fixture
@@ -19,6 +16,7 @@ def database(mocker):
     fake_connection = mocker.AsyncMock()
     fake_connection.fetchval.return_value = 1
     fake_connection.execute.return_value = None
+    fake_connection.transaction = mocker.Mock(return_value=mocker.AsyncMock())
 
     # 2. Pula połączeń musi być ZWYKŁYM Mockiem (bo db_pool.acquire() nie ma 'await')
     fake_pool = mocker.Mock()
@@ -61,9 +59,12 @@ def mock_httpx_router(mocker):
             
         raise ValueError(f"Unknown URL: {url}")
 
-    return mocker.patch("main.client.post", side_effect=router)
+    client = mocker.Mock(post=mocker.AsyncMock(side_effect=router))
+    mocker.patch("main.client", client)
+    return client.post
 
-def test_successful_send(client, mocker):
+@pytest.mark.asyncio
+async def test_successful_send(client, mocker):
 
     mock_worker = mocker.patch("main.worker", new_callable=mocker.AsyncMock)
 
@@ -77,7 +78,7 @@ def test_successful_send(client, mocker):
         "document_id": "random_id",
         "callback_url": "callback_url"
     }
-    response = client.post("/document", json=payload)
+    response = await client.post("/document", json=payload)
 
     assert response.status_code == 200 
     assert response.json() == {"status": "started"}
@@ -108,7 +109,7 @@ async def test_apify_send_success(mock_httpx_router, database, mocker):
 
     # 1. Sprawdzamy bazę (czy licznik skanów został odpytany i czy wykonano UPDATE/INSERT)
     assert database.fetchval.call_count >= 1
-    assert database.execute.call_count == 1
+    assert database.execute.call_count == 2
     
     # 2. Sprawdzamy uderzenia do sieci (Router HTTPX)
     called_urls = [str(call.args[0]) for call in mock_httpx_router.call_args_list]

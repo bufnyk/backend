@@ -2,6 +2,7 @@ from fastapi import FastAPI, BackgroundTasks
 from pydantic import BaseModel
 import httpx
 import os
+from html import escape
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -32,9 +33,9 @@ async def send_to_telegram(text: str):
 async def log_error(error: ErrorPayload, background_tasks: BackgroundTasks):
     
     message = (
-        f"<b>ALERT: {error.app_name}</b>\n\n"
-        f"<b>Błąd:</b> <code>{error.error_message}</code>\n\n"
-        f"<b>Traceback:</b>\n<pre>{error.traceback[:3000]}</pre>"
+        f"<b>ALERT: {escape(error.app_name)}</b>\n\n"
+        f"<b>Błąd:</b> <code>{escape(error.error_message)}</code>\n\n"
+        f"<b>Traceback:</b>\n<pre>{escape(error.traceback[:3000])}</pre>"
     )
     
     background_tasks.add_task(send_to_telegram, message)

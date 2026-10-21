@@ -1,5 +1,6 @@
-from fastapi import FastAPI, Depends
-from pydantic import BaseModel
+from fastapi import FastAPI, Depends, HTTPException
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 from tenacity import retry, stop_after_attempt, wait_fixed
 import asyncpg
 import os
@@ -7,26 +8,34 @@ import asyncio
 import traceback
 import httpx
 from dotenv import load_dotenv
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, AsyncExitStack
 import cohere
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 import json
 import io
+from functools import wraps
 from urllib.parse import urlparse
 from google import genai
 from google.genai import types 
+if __package__:
+    from .model_router import generate_reply
+else:
+    from model_router import generate_reply
 
 load_dotenv()
 PSTG_URL = os.getenv("PSTG_URL")
 COHERE_API_KEY = os.getenv("COHERE_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 DB_POOL_MIN_SIZE = int(os.getenv("DB_POOL_MIN_SIZE", "1"))
 DB_POOL_MAX_SIZE = int(os.getenv("DB_POOL_MAX_SIZE", "2"))
 db_pool = None
 co = None
 client = None
 httpx_client = None
+CHAT_REQUEST_TIMEOUT_SECONDS = 90
+CHAT_ERROR_MESSAGE = "External error occurred. Try again later"
 
 MAX_CHAT_FILE_SIZE = 10 * 1024 * 1024
 MAX_CHAT_ATTACHMENTS = int(os.getenv("MAX_CHAT_ATTACHMENTS", "20"))
@@ -64,8 +73,8 @@ class DownloadedAttachment(BaseModel):
 class Chatbot(BaseModel):
     company_name: str
     message: str
-    conversation_history: list[dict]
-    language: str
+    conversation_history: list[dict] = Field(default_factory=list)
+    language: str | None = None
     conversationId: str
     file_attachments: list[FileAttachment] | None = None
 
@@ -74,7 +83,7 @@ class Test_Chatbot(BaseModel):
     company_name: str
     message: str
     message_history: list[dict]
-    language: str
+    language: str | None = None
 
 class Copilot(BaseModel):
     company_name: str
@@ -128,9 +137,11 @@ async def get_inital_data(connection, company_name):
     FROM ai_persona_config
     WHERE company_name = $1                                    
     ''', company_name)
+    if row is None:
+        raise ValueError("AI persona configuration was not found")
     return row
 
-async def call_human(connection, summary, session_id, client_name=""):
+async def call_human(connection, summary, session_id, company_name, client_name=""):
     current_utc_time = datetime.now(timezone.utc)
 
     await connection.execute('''
@@ -141,15 +152,17 @@ async def call_human(connection, summary, session_id, client_name=""):
          client_name = $2,
          summary = $3
         WHERE session_id = $4
-    ''', current_utc_time, client_name, summary, session_id)
+          AND company_name = $5
+    ''', current_utc_time, client_name, summary, session_id, company_name)
     return "completed"
 
-async def unresolved(connection, session_id):
+async def unresolved(connection, session_id, company_name):
     await connection.execute('''
         UPDATE conversations
         SET solved = FALSE
         WHERE session_id = $1
-    ''', session_id)
+          AND company_name = $2
+    ''', session_id, company_name)
     return "completed"
 
 @asynccontextmanager
@@ -159,23 +172,29 @@ async def lifespan(app: FastAPI):
     global client
     global httpx_client
 
-    db_pool = await asyncpg.create_pool(
-        PSTG_URL,
-        min_size=DB_POOL_MIN_SIZE,
-        max_size=DB_POOL_MAX_SIZE,
-    )
-    co = cohere.AsyncClient(api_key=COHERE_API_KEY)
-    client = genai.Client(api_key=GEMINI_API_KEY)
-    httpx_client = httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0))
-
-    yield
-
-    await httpx_client.aclose()
-    await db_pool.close()
+    async with AsyncExitStack() as stack:
+        db_pool = await asyncpg.create_pool(
+            PSTG_URL,
+            min_size=DB_POOL_MIN_SIZE,
+            max_size=DB_POOL_MAX_SIZE,
+        )
+        stack.push_async_callback(db_pool.close)
+        co = await stack.enter_async_context(cohere.AsyncClient(api_key=COHERE_API_KEY))
+        client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+        if client is not None:
+            stack.callback(client.close)
+            stack.push_async_callback(client.aio.aclose)
+        httpx_client = await stack.enter_async_context(
+            httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0))
+        )
+        yield
 
 async def get_connection():
-    async with db_pool.acquire() as connection:
-        yield connection
+    try:
+        async with db_pool.acquire(timeout=5) as connection:
+            yield connection
+    except TimeoutError as error:
+        raise HTTPException(status_code=503, detail="Chat database is busy") from error
 
 
 def parse_file_attachments(raw_attachments) -> list[FileAttachment]:
@@ -242,6 +261,7 @@ def merge_and_limit_attachments(*attachment_groups: list[FileAttachment]) -> lis
     attachments_by_url = {}
     for group in attachment_groups:
         for attachment in group:
+            attachments_by_url.pop(attachment.url, None)
             attachments_by_url[attachment.url] = attachment
 
     unique_attachments = list(attachments_by_url.values())[-MAX_CHAT_ATTACHMENTS:]
@@ -265,7 +285,10 @@ async def download_attachment(attachment: FileAttachment) -> DownloadedAttachmen
         raise ValueError(f"Invalid chat attachment size: {attachment.size}")
 
     parsed_url = urlparse(attachment.url)
-    if parsed_url.scheme != "https" or (parsed_url.hostname or "").lower() not in ALLOWED_CHAT_FILE_HOSTS:
+    if (parsed_url.scheme != "https"
+            or (parsed_url.hostname or "").lower() not in ALLOWED_CHAT_FILE_HOSTS
+            or parsed_url.port not in (None, 443)
+            or parsed_url.username is not None or parsed_url.password is not None):
         raise ValueError("Chat attachment URL is not allowed")
     if httpx_client is None:
         raise RuntimeError("HTTP client is not initialized")
@@ -289,7 +312,7 @@ async def download_attachment(attachment: FileAttachment) -> DownloadedAttachmen
     return DownloadedAttachment(attachment=attachment, content=bytes(file_content))
 
 
-async def create_attachment_inputs(attachments: list[FileAttachment]):
+async def download_attachments(attachments: list[FileAttachment]):
     downloaded_attachments = []
     actual_total_size = 0
     download_results = await asyncio.gather(
@@ -310,6 +333,14 @@ async def create_attachment_inputs(attachments: list[FileAttachment]):
             actual_total_size -= len(downloaded.content)
             continue
         downloaded_attachments.append(downloaded)
+
+    return downloaded_attachments, failed_count
+
+
+async def create_attachment_inputs(attachments: list[FileAttachment], *, downloaded_attachments=None):
+    failed_count = 0
+    if downloaded_attachments is None:
+        downloaded_attachments, failed_count = await download_attachments(attachments)
 
     async def create_file_input(downloaded: DownloadedAttachment, use_inline: bool):
         attachment = downloaded.attachment
@@ -372,9 +403,36 @@ async def create_attachment_inputs(attachments: list[FileAttachment]):
     return attachment_inputs, processed_attachments, failed_count
 
 
+async def prepare_gemini_inputs(downloaded_attachments):
+    inputs, _, failed = await create_attachment_inputs([], downloaded_attachments=downloaded_attachments)
+    if failed:
+        raise RuntimeError("Gemini could not read all selected attachments")
+    return inputs
+
+
+async def generate_chat_reply(system_prompt, user_input, tools, attachments=None):
+    return await generate_reply(
+        httpx_client, OPENAI_API_KEY, client, system_prompt, user_input,
+        tools, attachments or [], prepare_gemini_inputs,
+    )
+
+
+def with_chat_timeout(handler):
+    @wraps(handler)
+    async def wrapped(*args, **kwargs):
+        try:
+            async with asyncio.timeout(CHAT_REQUEST_TIMEOUT_SECONDS):
+                return await handler(*args, **kwargs)
+        except TimeoutError:
+            print("[chatbot] request deadline exceeded")
+            return JSONResponse(status_code=504, content={"message": CHAT_ERROR_MESSAGE, "error": True})
+    return wrapped
+
+
 app = FastAPI(lifespan=lifespan)
 #async def prompt_creator(prompt_type, company_context, persona, instructions, hard_rules, chat_setings)
 @app.post("/chatbot")
+@with_chat_timeout
 async def chatbot_response(data: Chatbot, connection = Depends(get_connection)):
 
     async def knowledge_base(message:str):
@@ -398,7 +456,7 @@ async def chatbot_response(data: Chatbot, connection = Depends(get_connection)):
             tak aby agent wiedział mniej więcej o co chodzi
             client_name: Imię klienta, jeśli nie podał to zostaw puste
         '''
-        return await call_human(connection, summary, data.conversationId, client_name)
+        return await call_human(connection, summary, data.conversationId, data.company_name, client_name)
     
     async def not_resolved():
         '''
@@ -407,7 +465,7 @@ async def chatbot_response(data: Chatbot, connection = Depends(get_connection)):
         Używaj kiedy klient chce rozmawawiać z człowiekiem, natomiast obecnie nie możesz
         go połączyć lub kiedy jasno oznajmi, że nie jest zadolowny z twojej obsługi.
         '''
-        return await unresolved(connection, data.conversationId)
+        return await unresolved(connection, data.conversationId, data.company_name)
     
     tools = {
         "knowledge_base": knowledge_base,
@@ -441,9 +499,11 @@ async def chatbot_response(data: Chatbot, connection = Depends(get_connection)):
             f"selection_skipped={selection_skipped_count}"
         )
 
-        attachment_inputs, processed_attachments, failed_attachment_count = await create_attachment_inputs(attachments)
+        downloaded_attachments, failed_attachment_count = await download_attachments(attachments)
+        processed_attachments = [item.attachment for item in downloaded_attachments]
         skipped_attachment_count = selection_skipped_count + failed_attachment_count
-        if payload_attachments and not processed_attachments:
+        current_urls = {attachment.url for attachment in payload_attachments}
+        if current_urls and not any(attachment.url in current_urls for attachment in processed_attachments):
             return {
                 "message": "Nie udało się pobrać ani odczytać przesłanych załączników. Spróbuj dodać je ponownie.",
                 "attachments_processed": 0,
@@ -471,55 +531,18 @@ async def chatbot_response(data: Chatbot, connection = Depends(get_connection)):
         </user_interaction>
         '''
 
-        config = types.GenerateContentConfig(
-            tools=[knowledge_base, human_handoff, not_resolved],
-            system_instruction=system_prompt,
-            
-        )
-        chat = client.aio.chats.create(
-            model="gemini-3.8-flash",
-            config=config
-        )
-
-        current_message = attachment_inputs
-        current_message.append(types.Part.from_text(text=client_input))
-        response = await chat.send_message(current_message)
-
-        max_iter = 5
-        start = 0
-        
-        while start < max_iter:
-            start += 1
-            tools_results = []
-            if not response.function_calls:
-                return {
-                    "message": response.text,
-                    "attachments_processed": len(processed_attachments),
-                    "attachments_skipped": skipped_attachment_count,
-                }
-            
-            for tool in response.function_calls:
-                arguments = tool.args
-                tool_name = tool.name
-
-                if tool_name in tools:
-                    tool_result = await tools[tool_name](**arguments)
-                else:
-                    tool_result = "Tool doesn't exist"
-                tools_results.append(
-                    types.Part.from_function_response(
-                        name=tool_name,
-                        response={"result": tool_result}
-                    )
-                )
-            
-            response = await chat.send_message(tools_results)
-        return {"message": "External error occured. Try again later"}
+        message = await generate_chat_reply(system_prompt, client_input, tools, downloaded_attachments)
+        return {
+            "message": message,
+            "attachments_processed": len(processed_attachments),
+            "attachments_skipped": skipped_attachment_count,
+        }
     except Exception as e:
         asyncio.create_task(logger(str(e), traceback.format_exc()))
-        return {"message":"External error occured. Try again later"}
+        return JSONResponse(status_code=503, content={"message": CHAT_ERROR_MESSAGE, "error": True})
     
 @app.post("/test_chatbot")
+@with_chat_timeout
 async def test_chatbot_response(data: Test_Chatbot, connection = Depends(get_connection)):
     async def knowledge_base(message:str):
         '''
@@ -547,47 +570,14 @@ async def test_chatbot_response(data: Test_Chatbot, connection = Depends(get_con
         </current_client_input>
         </user_interaction>
         '''
-        config = types.GenerateContentConfig(
-            tools=[knowledge_base],
-            system_instruction=system_prompt,
-        )
-        chat = client.aio.chats.create(
-            model="gemini-3.8-flash",
-            config=config
-        )
-        response = await chat.send_message(client_input)
-        max_iter = 5
-        start = 0
-        
-        while start < max_iter:
-            start += 1
-            tools_results = []
-            if not response.function_calls:
-                return {"message": response.text}
-            
-            for tool in response.function_calls:
-                arguments = tool.args
-                tool_name = tool.name
-
-                if tool_name in tools:
-                    tool_result = await tools[tool_name](**arguments)
-                else:
-                    tool_result = "Tool doesn't exist"
-                tools_results.append(
-                    types.Part.from_function_response(
-                        name=tool_name,
-                        response={"result": tool_result}
-                    )
-                )
-            
-            response = await chat.send_message(tools_results)
-        return {"message": "External error occured. Try again later"}
+        return {"message": await generate_chat_reply(system_prompt, client_input, tools)}
     except Exception as e:
         asyncio.create_task(logger(str(e), traceback.format_exc()))
-        return {"message":"External error occured. Try again later"}
+        return JSONResponse(status_code=503, content={"message": CHAT_ERROR_MESSAGE, "error": True})
 
 
 @app.post("/copilot")
+@with_chat_timeout
 async def copilot_response(data: Copilot, connection = Depends(get_connection)):
     async def knowledge_base(message:str):
         '''
@@ -631,52 +621,16 @@ async def copilot_response(data: Copilot, connection = Depends(get_connection)):
         Twoja odpowiedź dla Agenta:
         '''
 
-        config = types.GenerateContentConfig(
-            tools=[knowledge_base],
-            system_instruction=system_prompt
-        )
-        chat = client.aio.chats.create(
-            model="gemini-3.8-flash",
-            config=config
-        )
-
-        response = await chat.send_message(client_input)
-
-        max_iter = 5
-        start = 0
-        
-        while start < max_iter:
-            start += 1
-            tools_results = []
-            if not response.function_calls:
-                return {"message": response.text}
-            
-            for tool in response.function_calls:
-                arguments = tool.args
-                tool_name = tool.name
-
-                if tool_name in tools:
-                    tool_result = await tools[tool_name](**arguments)
-                else:
-                    tool_result = "Tool doesn't exist"
-                tools_results.append(
-                    types.Part.from_function_response(
-                        name=tool_name,
-                        response={"result": tool_result}
-                    )
-                )
-            
-            response = await chat.send_message(tools_results)
-        return {"message": "External error occured. Try again later"}
+        return {"message": await generate_chat_reply(system_prompt, client_input, tools)}
     except Exception as e:
         asyncio.create_task(logger(str(e), traceback.format_exc()))
-        return {"message":"External error occured. Try again later"}
+        return JSONResponse(status_code=503, content={"message": CHAT_ERROR_MESSAGE, "error": True})
 
 
 async def logger(error_string, traceback_string):
     try:
         await httpx_client.post(
-            "http://log-error_container:8000",
+            "http://log-error_container:8000/log-error",
             json={
                 "app_name": "chatbot",
                 "error_message": error_string,

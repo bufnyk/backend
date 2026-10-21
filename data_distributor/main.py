@@ -203,6 +203,7 @@ async def worker(data: Payload):
                         }
                     )
                     
+                r.raise_for_status()
                 response_dict = r.json()
                 company_name = data.metadata.company_name
                 dataset_id = response_dict["data"]["defaultDatasetId"]
@@ -210,31 +211,25 @@ async def worker(data: Payload):
                 filename = data.metadata.original_filename
                 hash = data.metadata.file_hash
 
-                if r.status_code == 200:
+                async with connection.transaction():
                     await connection.execute('''
                         INSERT INTO "apify_url-scraper"(company_name, dataset_id, document_id, file_name, hash)
                         VALUES($1, $2, $3, $4, $5);
-
+                    ''', company_name, dataset_id, doc_id, filename, hash)
+                    await connection.execute('''
                         UPDATE document_uploads
                         SET status = 'scanning'
-                        WHERE id = $3;
-                    ''', company_name, dataset_id, doc_id, filename, hash)
-                else:
-                    await client.post(
-                        "https://ntnoptppvhvezqbdbcyl.supabase.co/functions/v1/document-callback",
-                        headers=headers,
-                        json={
-                            "document_id": data.document_id,
-                            "status": "failed",
-                            "error": str(r)
-                            }
-                        )
+                        WHERE id = $1;
+                    ''', doc_id)
 
             else:
                 extracted_text = []
                 r = await client.get(data.file_url)
+                r.raise_for_status()
+                mime_type = (data.metadata.mime_type or "").lower()
+                filename = data.metadata.original_filename.lower()
 
-                if data.metadata.mime_type.endswith('docx'):
+                if mime_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document" or filename.endswith('.docx'):
                     virtual_file = io.BytesIO(r.content)
                     doc = docx.Document(virtual_file)
                     for paragraph in doc.paragraphs:
@@ -246,7 +241,7 @@ async def worker(data: Payload):
 
 
                 else:
-                    if data.metadata.mime_type.endswith('pdf'):
+                    if mime_type == "application/pdf" or filename.endswith('.pdf'):
                         doc = fitz.open(stream=r.content, filetype="pdf")
                         for page in doc:
                             text = page.get_text().strip()
@@ -257,11 +252,15 @@ async def worker(data: Payload):
                             extracted_text.append(text)
                         doc.close()
 
-                    elif data.metadata.mime_type.endswith('txt'):
-                        text = r.content.decode('utf-8')
+                    elif mime_type.startswith('text/') or filename.endswith('.txt'):
+                        text = r.content.decode('utf-8-sig')
                         extracted_text.append(text)
+                    else:
+                        raise ValueError("Unsupported document type")
                         
-                joined_text = " ".join(extracted_text)   
+                joined_text = " ".join(extracted_text)
+                if not joined_text.strip():
+                    raise ValueError("Document contains no readable text")
                 final_embeddings = []
                 list_for_cohere = text_splitter.split_text(joined_text)
 
@@ -324,7 +323,7 @@ async def worker(data: Payload):
 async def logger(error_string, traceback_string):
     try:
         await client.post(
-            "http://log-error_container:8000",
+            "http://log-error_container:8000/log-error",
             json={
                 "app_name": "data_distributor",
                 "error_message": error_string,

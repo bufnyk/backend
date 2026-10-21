@@ -1,58 +1,41 @@
-import pytest 
-from fastapi.testclient import TestClient
-from vectix.backend.prompt_rewrite.main import app
+import unittest
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+
+import httpx
+
+import main
 
 
-@pytest.fixture
-def client():
-    with TestClient(app) as client:
-        yield client
-    
-@pytest.fixture
-def database(mocker):
+class FeedbackEndpointTests(unittest.IsolatedAsyncioTestCase):
+    async def test_delete_feedback_over_http(self):
+        connection = AsyncMock()
+        connection.fetchrow.return_value = {"learned_instructions": "Brak", "hard_rules": "Brak"}
 
-    mock_connection = mocker.AsyncMock()
-    mock_connection.fetchrow.return_value = {"learned_instructions": "Brak", "hard_rules": "Brak"}
-    mock_connection.execute.return_value=None
-  
-    mock_pool = mocker.Mock()
-    
-    mocker.patch("asyncpg.create_pool", new_callable=mocker.AsyncMock, return_value=mock_pool)
-    mock_context_manager = mocker.AsyncMock()
-    
-    mock_pool.acquire.return_value = mock_context_manager
-    mock_pool.close = mocker.AsyncMock() #close chce courtine (await db_pool.close())
-    mock_context_manager.__aenter__.return_value=mock_connection
-    return mock_connection
+        async def connection_override():
+            yield connection
 
-def test_main_delete(database, client, mocker):
-    payload = {
-        "action": "delete",
-        "companyName": "test",
-        "userId": "test_user",
-        "timestamp": "test_timestamp",
-        "feedbackId": "test_feeedbackid",
-        "instruction": "test_instruction",
-        "aiMessage": "test_ai_message",
-        "userMessage": "test_user_message",
-        "comment": "test_comment",
-        "importance": 3,
-    }
-    op_content = mocker.Mock(content="test content")
-    op_message = mocker.Mock(message=op_content)
-    op_choices = mocker.Mock(choices=[op_message])
-    mock_op_client = mocker.AsyncMock()
-    mock_op_client.chat.send_async.return_value=op_choices
+        main.app.dependency_overrides[main.get_connection] = connection_override
+        self.addCleanup(main.app.dependency_overrides.clear)
+        send = AsyncMock(return_value=SimpleNamespace(choices=[SimpleNamespace(
+            message=SimpleNamespace(content="test content"),
+        )]))
+        context = AsyncMock()
+        context.__aenter__.return_value = SimpleNamespace(chat=SimpleNamespace(send_async=send))
+        payload = {
+            "action": "delete", "companyName": "test", "userId": "test_user",
+            "timestamp": "test", "feedbackId": "feedback", "instruction": "test",
+            "aiMessage": "test", "userMessage": "test", "comment": "test", "importance": 3,
+        }
+        with patch.object(main, "OpenRouter", return_value=context):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url="http://testserver") as client:
+                response = await client.post("/feedback", json=payload)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"status": 200})
+        self.assertEqual(connection.execute.await_count, 3)
+        send.assert_awaited_once()
 
-    mock_op = mocker.AsyncMock()
-    mock_op.__aenter__.return_value=mock_op_client
 
-    mocker.patch("main.OpenRouter", return_value=mock_op)
-
-    response = client.post("/feedback", json=payload)
-    assert response.status_code == 200
-    assert response.json() == {"status": 200}
-    assert database.fetchrow.call_count >= 2
-    assert database.execute.call_count >= 3
-    assert mock_op_client.chat.send_async.call_count == 1
+if __name__ == "__main__":
+    unittest.main()
 

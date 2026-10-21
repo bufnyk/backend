@@ -38,7 +38,14 @@ class AttachmentParsingTests(unittest.TestCase):
             [third],
         )
 
-        self.assertEqual([item.name for item in merged], ["first.jpg", "second.jpg", "third.jpg"])
+        self.assertEqual([item.name for item in merged], ["second.jpg", "first.jpg", "third.jpg"])
+
+    def test_current_attachment_is_retained_when_it_also_exists_in_old_history(self):
+        current = attachment("current.jpg")
+        history = [current, attachment("newer.jpg"), attachment("newest.jpg")]
+        with patch.object(main, "MAX_CHAT_ATTACHMENTS", 2):
+            merged = main.merge_and_limit_attachments(history, [current])
+        self.assertEqual([item.name for item in merged], ["newest.jpg", "current.jpg"])
 
     def test_prioritizes_the_newest_files_when_history_exceeds_the_limit(self):
         files = [attachment("oldest.jpg"), attachment("newer.jpg"), attachment("current.jpg")]

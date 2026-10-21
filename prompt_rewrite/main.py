@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI, Depends, HTTPException
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
 import os
@@ -48,11 +48,33 @@ async def get_connection():
     async with db_pool.acquire() as connection:
         yield connection
 
+
+async def rewrite_instructions(service_prompt, user_input):
+    messages = [
+        {"role": "system", "content": service_prompt},
+        {"role": "user", "content": user_input},
+    ]
+    for model in ("anthropic/claude-sonnet-4.6", "google/gemini-3.1-pro-preview"):
+        try:
+            async with asyncio.timeout(30):
+                async with OpenRouter(api_key=OPEN_ROUTER) as client:
+                    options = {"temperature": 0.2} if model.startswith("anthropic/") else {}
+                    response = await client.chat.send_async(model=model, messages=messages, **options)
+                    text = response.choices[0].message.content
+                    if not isinstance(text, str) or not text.strip():
+                        raise ValueError("Prompt rewrite model returned an empty response")
+                    return text
+        except Exception:
+            if model.startswith("google/"):
+                raise
+
 @app.post("/feedback")
 async def main(data: Payload, connection = Depends(get_connection)):
 
-    while True:
-        row = await connection.fetchrow('''
+    try:
+        async with asyncio.timeout(20):
+            while True:
+                row = await connection.fetchrow('''
         UPDATE ai_persona_config
         SET is_locked = true,
             locked_at = NOW()
@@ -61,16 +83,21 @@ async def main(data: Payload, connection = Depends(get_connection)):
         RETURNING is_locked, locked_at
     ''', data.companyName)
 
-        if row:
-            break
-        
-        await asyncio.sleep(5)
+                if row:
+                    break
+
+                await asyncio.sleep(5)
+    except TimeoutError as error:
+        raise HTTPException(status_code=409, detail="AI configuration is busy or unavailable") from error
     try:
         row = await connection.fetchrow('''
             SELECT learned_instructions, hard_rules
             FROM ai_persona_config
             WHERE company_name = $1
         ''', data.companyName)
+
+        if row is None:
+            raise HTTPException(status_code=404, detail="AI configuration was not found")
 
         user_input = f'''
         **Feedback szefa firmy:** 
@@ -150,43 +177,13 @@ async def main(data: Payload, connection = Depends(get_connection)):
             - Ma to być czysty tekst gotowy do zapisania w bazie danych i wrzucony do system prompa chatbota.
         '''
         
-        async with OpenRouter(api_key=OPEN_ROUTER) as client:
-                response = await client.chat.send_async(
-                    model="anthropic/claude-sonnet-4.6",
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": service_prompt,
-                        },
-                        {
-                            "role": "user",
-                            "content": user_input,
-                        }
-                    ],
-                    temperature=0.2,
-                )
-    except Exception as e:
-        async with OpenRouter(api_key=OPEN_ROUTER) as client:
-                response = await client.chat.send_async(
-                    model="google/gemini-3.1-pro-preview",
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": service_prompt,
-                        },
-                        {
-                            "role": "user",
-                            "content": user_input,
-                        }
-                    ],
-                )
-    
-    try:
+        learned_instructions = await rewrite_instructions(service_prompt, user_input)
+
         await connection.execute('''
         UPDATE ai_persona_config
         SET learned_instructions = $1                             
         WHERE company_name = $2
-        ''', response.choices[0].message.content, data.companyName)
+        ''', learned_instructions, data.companyName)
 
         if data.action == "delete":
             await connection.execute('''
