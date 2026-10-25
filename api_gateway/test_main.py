@@ -5,7 +5,7 @@ import httpx
 import pytest
 import pytest_asyncio
 
-from vectix.backend.api_gateway import main as gateway
+from api_gateway import main as gateway
 
 
 @pytest_asyncio.fixture
@@ -71,6 +71,62 @@ async def test_successful_proxy_request(client, mock_redis, mock_httpx_success):
     assert kwargs["url"] == "http://chatbot:8000/chatbot"
     assert kwargs["method"] == "POST"
     assert json.loads(kwargs["content"]) == payload
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload", [
+    [{
+        "datasetId": "zCTZFfdfpCdXlKH9R",
+        "limit": 9,
+        "offset": 0,
+        "totalItems": 9,
+        "batchNumber": 1,
+        "databaseRow": {
+            "id": 80,
+            "created_at": "2026-10-25T20:11:06.17328+00:00",
+            "company_name": "testowe",
+            "dataset_id": "zCTZFfdfpCdXlKH9R",
+            "document_id": "ecf6a508-168c-4f47-9d0f-aaa49c3ac7e8",
+            "hash": "test-document-hash",
+            "file_name": "https://vectixai.com/ - 25/10/2026",
+        },
+    }],
+    [],
+    None,
+    "text",
+    42,
+    True,
+])
+async def test_non_object_json_is_forwarded_with_ip_limit(
+    client, mock_redis, mock_httpx_success, payload
+):
+    response = await client.post(
+        "/loader",
+        content=json.dumps(payload),
+        headers={"Content-Type": "application/json", "X-Forwarded-For": "192.0.2.10"},
+    )
+
+    assert response.status_code == 200
+    mock_httpx_success.assert_awaited_once()
+    _, kwargs = mock_httpx_success.call_args
+    assert kwargs["url"] == "http://processor:8000/loader"
+    assert json.loads(kwargs["content"]) == payload
+    mock_redis.incr.assert_awaited_once_with("rate_limit:192.0.2.10")
+    mock_redis.expire.assert_awaited_once_with("rate_limit:192.0.2.10", 60)
+
+
+@pytest.mark.asyncio
+async def test_array_payload_still_enforces_ip_limit(client, mock_redis, mock_httpx_success):
+    mock_redis.incr.return_value = 101
+
+    response = await client.post(
+        "/loader", json=[{"datasetId": "test-dataset"}],
+        headers={"X-Forwarded-For": "192.0.2.10"},
+    )
+
+    assert response.status_code == 429
+    mock_redis.incr.assert_awaited_once_with("rate_limit:192.0.2.10")
+    mock_httpx_success.assert_not_awaited()
 
 
 @pytest.mark.asyncio

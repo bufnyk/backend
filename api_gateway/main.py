@@ -107,6 +107,9 @@ async def check_rate_limit(request: Request) -> bool:
             body = await request.json()
         except Exception:
             body = {}
+
+    if not isinstance(body, dict):
+        body = {}
     
     user_id = body.get("user_id")
     conversation_id = body.get("conversationId")
