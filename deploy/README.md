@@ -24,6 +24,11 @@ Configure a GitHub `production` environment with these secrets:
 - `HETZNER_SSH_PRIVATE_KEY`: private key accepted by the server for `root`.
 - `HETZNER_KNOWN_HOSTS`: verified `known_hosts` entry for the server.
 - `BACKEND_ENV_FILE`: complete production `.env` content based on `env_example`.
+- `BACKEND_CALLBACK_SECRET`: raw callback secret, identical to the value expected
+  by the Supabase `document-callback` function. Enter the value without wrapping
+  quotes. Deployment replaces `CALLBACK_SECRET` from `BACKEND_ENV_FILE` with this
+  value and writes it in literal single-quoted form for Compose. This secret is
+  required; a missing or empty value aborts environment installation.
 
 Single-quote literal values containing `$` in `BACKEND_ENV_FILE` and `.env` so
 Compose does not substitute parts of a secret as environment variables.

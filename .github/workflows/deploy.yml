@@ -67,12 +67,16 @@ jobs:
       - name: Install production environment
         env:
           BACKEND_ENV_FILE: ${{ secrets.BACKEND_ENV_FILE }}
+          BACKEND_CALLBACK_SECRET: ${{ secrets.BACKEND_CALLBACK_SECRET }}
         run: |
           set -Eeuo pipefail
           test -n "$BACKEND_ENV_FILE"
-          printf '%s' "$BACKEND_ENV_FILE" | \
-            ssh -p "$SSH_PORT" "$REMOTE" \
-              "umask 077; cat > '$REMOTE_BACKEND_DIR/.env'"
+          umask 077
+          rendered_env="$(mktemp)"
+          trap 'rm -f "$rendered_env"' EXIT
+          python3 deploy/render-env.py > "$rendered_env"
+          ssh -p "$SSH_PORT" "$REMOTE" \
+            "umask 077; cat > '$REMOTE_BACKEND_DIR/.env'" < "$rendered_env"
 
       - name: Build and deploy services
         run: |
