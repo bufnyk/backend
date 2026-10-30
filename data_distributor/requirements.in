@@ -3,6 +3,7 @@ uvicorn[standard]
 pydantic
 asyncpg
 httpx
+charset-normalizer
 pymupdf
 pytesseract
 pillow

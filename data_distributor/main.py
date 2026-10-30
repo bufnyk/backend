@@ -3,18 +3,15 @@ from pydantic import BaseModel
 import asyncio
 import asyncpg
 import httpx
-import fitz #PyMuPDF
-import pytesseract
-from PIL import Image
-import io
+import math
 import os
 from dotenv import load_dotenv
 if __package__:
     from .functions import globs
+    from .document_processing import DocumentExtractor, split_sections
 else:
     from functions import globs
-import docx
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+    from document_processing import DocumentExtractor, split_sections
 import cohere
 from supabase import create_async_client
 from contextlib import asynccontextmanager
@@ -25,6 +22,9 @@ PSTG_URL = os.getenv("PSTG_URL")
 APIFY = os.getenv("APIFY")
 CALLBACK_SECRET = os.getenv("CALLBACK_SECRET")
 COHERE_API_KEY = os.getenv("COHERE_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+DOCUMENT_OCR_MODEL = os.getenv("DOCUMENT_OCR_MODEL", "gpt-6-luna")
+DOCUMENT_OCR_MIN_TEXT_CHARS = int(os.getenv("DOCUMENT_OCR_MIN_TEXT_CHARS", "100"))
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 DB_POOL_MIN_SIZE = int(os.getenv("DB_POOL_MIN_SIZE", "1"))
@@ -37,7 +37,6 @@ client = None
 co = None
 sb = None
 db_pool = None
-text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
 
 
 class Metadata(BaseModel):
@@ -223,69 +222,55 @@ async def worker(data: Payload):
                     ''', doc_id)
 
             else:
-                extracted_text = []
-                r = await client.get(data.file_url)
+                if not data.file_url:
+                    raise ValueError("file_url is required for document uploads")
+                r = await client.get(data.file_url, follow_redirects=True, timeout=60)
                 r.raise_for_status()
-                mime_type = (data.metadata.mime_type or "").lower()
-                filename = data.metadata.original_filename.lower()
-
-                if mime_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document" or filename.endswith('.docx'):
-                    virtual_file = io.BytesIO(r.content)
-                    doc = docx.Document(virtual_file)
-                    for paragraph in doc.paragraphs:
-                        text = paragraph.text.strip()
-                        if text:
-                            extracted_text.append(text)
-
-                    virtual_file.close()
-
-
-                else:
-                    if mime_type == "application/pdf" or filename.endswith('.pdf'):
-                        doc = fitz.open(stream=r.content, filetype="pdf")
-                        for page in doc:
-                            text = page.get_text().strip()
-                            if len(text) < 50:
-                                pix = page.get_pixmap(dpi=300)
-                                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-                                text = pytesseract.image_to_string(img, lang='pol+eng').strip()
-                            extracted_text.append(text)
-                        doc.close()
-
-                    elif mime_type.startswith('text/') or filename.endswith('.txt'):
-                        text = r.content.decode('utf-8-sig')
-                        extracted_text.append(text)
-                    else:
-                        raise ValueError("Unsupported document type")
-                        
-                joined_text = " ".join(extracted_text)
-                if not joined_text.strip():
+                extractor = DocumentExtractor(
+                    client, OPENAI_API_KEY, DOCUMENT_OCR_MODEL, DOCUMENT_OCR_MIN_TEXT_CHARS,
+                )
+                sections = await extractor.extract(
+                    r.content, data.metadata.original_filename,
+                    data.metadata.mime_type or r.headers.get("content-type"),
+                )
+                chunks = split_sections(sections)
+                if not chunks:
                     raise ValueError("Document contains no readable text")
-                final_embeddings = []
-                list_for_cohere = text_splitter.split_text(joined_text)
-
-                for i in range(0, len(list_for_cohere), 90):
+                # Store each embedding batch immediately instead of retaining every vector.
+                vector_size = None
+                for i in range(0, len(chunks), 90):
+                    batch = chunks[i: i + 90]
                     cohere_res = await co.embed (
-                        texts=list_for_cohere[i: i + 90],
+                        texts=[chunk.text for chunk in batch],
                         input_type="search_document",
                         embedding_types=["float"],
                         model="embed-multilingual-v3.0"
                     )
-                    final_embeddings.extend(cohere_res.embeddings.float)
-                final_list = []
-                for vector, s_text in zip(final_embeddings, list_for_cohere):
-                    final_list.append({"content": s_text, "metadata": {
-                        "file_name": data.metadata.original_filename,
-                        "company_name": data.metadata.company_name,
-                        "chatbot": False,
-                        "copilot": False,
-                        "hash": data.metadata.file_hash
-                    }, "embedding": vector})
-
-                for i in range(0, len(final_list), 150):
+                    vectors = cohere_res.embeddings.float
+                    if len(vectors) != len(batch):
+                        raise ValueError("Embedding count does not match document chunk count")
+                    final_list = []
+                    for offset, (vector, chunk) in enumerate(zip(vectors, batch)):
+                        if vector_size is None:
+                            vector_size = len(vector)
+                        if not vector or len(vector) != vector_size or not all(math.isfinite(value) for value in vector):
+                            raise ValueError("Embedding response contains an invalid vector")
+                        metadata = {
+                            "file_name": data.metadata.original_filename,
+                            "company_name": data.metadata.company_name,
+                            "chatbot": False,
+                            "copilot": False,
+                            "hash": data.metadata.file_hash,
+                            "document_id": data.document_id,
+                            "chunk_index": i + offset,
+                            "extraction_method": chunk.extraction_method,
+                        }
+                        if chunk.page is not None:
+                            metadata["page"] = chunk.page
+                        final_list.append({"content": chunk.text, "metadata": metadata, "embedding": vector})
                     await (
                         sb.table("documents_view")
-                        .insert(final_list[i: i + 150])
+                        .insert(final_list)
                         .execute()
                     )
                     await asyncio.sleep(0.5)

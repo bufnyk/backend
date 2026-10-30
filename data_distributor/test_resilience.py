@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 import docx
+import fitz
 import httpx
 
 import main
@@ -80,6 +81,72 @@ class DocumentResilienceTests(unittest.IsolatedAsyncioTestCase):
         self.http_client.get.return_value = httpx.Response(200, content=b" \n", request=httpx.Request("GET", "https://example.com/file"))
         await main.worker(self.payload())
         self.cohere.embed.assert_not_awaited()
+        self.assert_callback_status("failed")
+
+    async def test_pdf_page_metadata_and_text_are_preserved_in_saved_embeddings(self):
+        with fitz.open() as document:
+            for index in range(2):
+                page = document.new_page()
+                page.insert_textbox(page.rect + (40, 40, -40, -40), f"Page {index + 1} content. " * 20)
+            content = document.tobytes()
+        self.http_client.get.return_value = httpx.Response(200, content=content, request=httpx.Request("GET", "https://example.com/file"))
+
+        async def embed(**kwargs):
+            return SimpleNamespace(embeddings=SimpleNamespace(float=[[0.1, 0.2] for _ in kwargs["texts"]]))
+
+        self.cohere.embed.side_effect = embed
+        await main.worker(self.payload("file.pdf", "application/pdf"))
+        rows = self.supabase.table.return_value.insert.call_args.args[0]
+        self.assertEqual([row["metadata"]["page"] for row in rows], [1, 2])
+        for index, row in enumerate(rows):
+            self.assertEqual(row["metadata"]["hash"], "hash")
+            self.assertEqual(row["metadata"]["document_id"], "document")
+            self.assertEqual(row["metadata"]["chunk_index"], index)
+            self.assertEqual(row["metadata"]["extraction_method"], "pdf_text")
+            self.assertIn(f"Page {index + 1} content.", row["content"])
+        self.assert_callback_status("completed")
+
+    async def test_missing_embeddings_or_invalid_vectors_fail_and_delete_by_hash(self):
+        for vectors in ([], [[]], [[float("nan"), 0.2]], [[float("inf"), 0.2]]):
+            with self.subTest(vectors=vectors):
+                self.cohere.embed.return_value = SimpleNamespace(embeddings=SimpleNamespace(float=vectors))
+                await main.worker(self.payload())
+                self.assert_callback_status("failed")
+                self.supabase.table.return_value.delete.return_value.eq.assert_called_with("file_hash", "hash")
+        self.insert.assert_not_awaited()
+
+    async def test_error_after_first_embedding_batch_removes_already_saved_chunks(self):
+        text = "\n\n".join(f"Record {index}: " + "value " * 110 for index in range(100))
+        self.http_client.get.return_value = httpx.Response(200, content=text.encode(), request=httpx.Request("GET", "https://example.com/file"))
+        calls = 0
+
+        async def embed(**kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise RuntimeError("Embedding service failed mid-document")
+            return SimpleNamespace(embeddings=SimpleNamespace(float=[[0.1, 0.2] for _ in kwargs["texts"]]))
+
+        self.cohere.embed.side_effect = embed
+        await main.worker(self.payload())
+        self.insert.assert_awaited_once()
+        self.assertEqual(len(self.supabase.table.return_value.insert.call_args.args[0]), 90)
+        self.supabase.table.return_value.delete.return_value.eq.assert_called_once_with("file_hash", "hash")
+        self.supabase.table.return_value.delete.return_value.eq.return_value.execute.assert_awaited_once()
+        self.assert_callback_status("failed")
+
+    async def test_ocr_error_prevents_partial_document_from_being_embedded(self):
+        with fitz.open() as document:
+            page = document.new_page()
+            page.insert_textbox(page.rect + (40, 40, -40, -40), "Readable first page. " * 20)
+            document.new_page().insert_text((40, 40), "Sparse second page")
+            content = document.tobytes()
+        self.http_client.get.return_value = httpx.Response(200, content=content, request=httpx.Request("GET", "https://example.com/file"))
+        with patch.object(main.DocumentExtractor, "ocr_page", new=AsyncMock(side_effect=ValueError("OCR did not complete"))):
+            await main.worker(self.payload("file.pdf", "application/pdf"))
+        self.cohere.embed.assert_not_awaited()
+        self.insert.assert_not_awaited()
+        self.supabase.table.return_value.delete.return_value.eq.assert_called_once_with("file_hash", "hash")
         self.assert_callback_status("failed")
 
     async def test_apify_201_uses_separate_statements_in_one_transaction(self):
