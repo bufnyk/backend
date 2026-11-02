@@ -9,6 +9,7 @@ import asyncio
 import httpx
 import cohere 
 import traceback
+import logging
 from contextlib import asynccontextmanager
 
 class Row(BaseModel):
@@ -41,6 +42,68 @@ headers = {
     "Content-Type": "application/json",
     "X-Callback-Secret": CALLBACK_SECRET
 }
+log = logging.getLogger(__name__)
+CALLBACK_URL = "https://ntnoptppvhvezqbdbcyl.supabase.co/functions/v1/document-callback"
+CALLBACK_TIMEOUT = httpx.Timeout(60.0, connect=10.0)
+CALLBACK_RETRY_DELAYS = (2, 5)
+CLEANUP_BATCH_SIZE = 100
+
+
+def describe_error(stage, error):
+    detail = str(error) or "exception has no message"
+    return f"{stage}: {type(error).__name__}: {detail}"
+
+
+async def send_callback(payload):
+    """Retry reporting only; a reporting failure must never roll back vectors."""
+    for attempt in range(len(CALLBACK_RETRY_DELAYS) + 1):
+        try:
+            response = await client.post(
+                CALLBACK_URL, headers=headers, json=payload, timeout=CALLBACK_TIMEOUT,
+            )
+            response.raise_for_status()
+            result = response.json()
+            if not isinstance(result, dict) or result.get("success") is not True:
+                raise ValueError("Callback did not confirm success")
+            if result.get("status") != payload["status"]:
+                raise ValueError(
+                    f"Callback returned status {result.get('status')!r}; "
+                    f"expected {payload['status']!r}"
+                )
+            return True
+        except Exception as error:
+            retryable = isinstance(error, httpx.TransportError) or (
+                isinstance(error, httpx.HTTPStatusError)
+                and (error.response.status_code == 429 or 500 <= error.response.status_code < 600)
+            )
+            message = describe_error(
+                f"callback {payload['status']} document_id={payload['document_id']} "
+                f"attempt={attempt + 1}", error,
+            )
+            if retryable and attempt < len(CALLBACK_RETRY_DELAYS):
+                log.warning("%s; retrying", message)
+                await asyncio.sleep(CALLBACK_RETRY_DELAYS[attempt])
+                continue
+            log.exception("%s; callback requires reconciliation; vectors retained", message)
+            await logger(message, traceback.format_exc())
+            return False
+
+
+async def cleanup_vectors(row):
+    """Limit each DELETE and restrict it to the importing company."""
+    while True:
+        result = await (
+            sb.table("documents").select("id")
+            .eq("company_name", row.company_name).eq("file_hash", row.hash)
+            .order("id").limit(CLEANUP_BATCH_SIZE).execute()
+        )
+        if not result.data:
+            return
+        await (
+            sb.table("documents").delete()
+            .eq("company_name", row.company_name).eq("file_hash", row.hash)
+            .in_("id", [item["id"] for item in result.data]).execute()
+        )
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -66,11 +129,19 @@ async def main(data: list[Payload], task: BackgroundTasks):
     return {"status": "processing started"}
 
 async def worker(data):
+    if not data:
+        log.error("Processor received an empty import")
+        return
+    stage = "starting import"
     try:
         for item in data:
 
             documents = []
-            payload = (await client.get(f"https://api.apify.com/v2/datasets/{item.datasetId}/items?limit={item.limit}&offset={item.offset}")).json()
+            stage = f"Apify download batch={item.batchNumber} offset={item.offset}"
+            response = await client.get(f"https://api.apify.com/v2/datasets/{item.datasetId}/items?limit={item.limit}&offset={item.offset}")
+            response.raise_for_status()
+            payload = response.json()
+            stage = f"splitting batch={item.batchNumber}"
             
             for element in payload:
 
@@ -100,6 +171,7 @@ async def worker(data):
 
             for i in range(0, len(list_for_cohere), 90):
 
+                stage = f"embedding batch={item.batchNumber} chunk_offset={i}"
                 res = await co.embed(
                     texts=list_for_cohere[i: i + 90],
                     input_type="search_document",
@@ -115,6 +187,7 @@ async def worker(data):
                 final_list.append({"content": metadata.page_content, "metadata":metadata.metadata, "embedding": vector })
             for i in range(0, len(final_list), 100):
 
+                stage = f"vector insert batch={item.batchNumber} chunk_offset={i}"
                 await (
                     sb.table("documents_view")
                     .insert(final_list[i: i + 100])
@@ -123,47 +196,33 @@ async def worker(data):
                 
                 await asyncio.sleep(1)
             del payload, documents, splitted_text, list_for_cohere, final_embeddings, final_list
-    
-            
-
-        await client.post(
-            "https://ntnoptppvhvezqbdbcyl.supabase.co/functions/v1/document-callback",
-            headers=headers,
-            json={
-                "document_id": data[0].databaseRow.document_id,
-                "status": "completed"
-            }
-        )
-
     except Exception as e:
-
-        asyncio.create_task(logger(str(e), traceback.format_exc()))
-        
+        message = describe_error(stage, e)
+        log.exception("%s", message)
+        await logger(message, traceback.format_exc())
         try:
-            await asyncio.sleep(5)
-            await (
-                sb.table("documents")
-                .delete()
-                .eq("file_hash", data[0].databaseRow.hash)
-                .execute()
-            )
-
+            await cleanup_vectors(data[0].databaseRow)
         except Exception as b:
-            print(f"error: {b}")
-        
-        await client.post(
-            "https://ntnoptppvhvezqbdbcyl.supabase.co/functions/v1/document-callback",
-            headers=headers,
-            json={
-                "document_id": data[0].databaseRow.document_id,
-                "status": "failed",
-                "error": str(e)
-                }
-            )
+            cleanup_error = describe_error("vector cleanup", b)
+            log.exception("%s", cleanup_error)
+            await logger(cleanup_error, traceback.format_exc())
+            message = f"{message}; {cleanup_error}"
+        await send_callback({
+            "document_id": data[0].databaseRow.document_id,
+            "status": "failed",
+            "error": message,
+        })
+        return
+
+    # Finalization is deliberately outside the import/cleanup exception handler.
+    await send_callback({
+        "document_id": data[0].databaseRow.document_id,
+        "status": "completed",
+    })
         
 async def logger(error_string, traceback_string):
     try:
-        await client.post(
+        response = await client.post(
             "http://log-error_container:8000/log-error",
             json={
                 "app_name": "data_processor",
@@ -171,5 +230,6 @@ async def logger(error_string, traceback_string):
                 "traceback": traceback_string,
             }
         )
+        response.raise_for_status()
     except Exception as e:
-        print(f"could not log the error {str(e)}")
+        log.error("%s", describe_error("could not deliver error alert", e))

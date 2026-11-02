@@ -50,3 +50,29 @@ are retained across providers to avoid repeating handoffs or unresolved flags.
 Run chatbot regression tests from `chatbot/` with
 `venv/bin/python -m unittest discover -v`. The tests mock network and database
 access; no API keys are required.
+
+The processor reports import results with a 60-second callback timeout (10 seconds
+to connect), up to three attempts, and 2- and 5-second retry delays for transport
+errors, HTTP 429, and HTTP 5xx. HTTP status and the callback's JSON result must both
+confirm success. Callback failures are logged locally and sent to the error alert
+service with the document ID, attempted status, exception type, and traceback.
+They never delete successfully stored vectors or send a contradictory `failed`.
+Import failures still clean up vectors, scoped by company and hash in batches of
+100, and include any cleanup failure in the reported error.
+
+After confirming that an import's vectors are fully stored, its completion can
+be reconciled without downloading or embedding again:
+
+```sh
+docker compose exec -T processor python retry_callback.py DOCUMENT_ID
+```
+
+This reruns the Supabase completion callback, including its vector count and
+replacement handling. The callback checks for a positive count, not completeness;
+verify the import before using this recovery command. It exits nonzero if reporting
+still fails. Retry state is not persisted automatically across container restarts;
+use the document ID in the alert for manual reconciliation.
+
+Run processor regression tests from `processor/` with
+`venv/bin/python -m unittest discover -v`. They mock external services and do not
+create embeddings or modify a database.
