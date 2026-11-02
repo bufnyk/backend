@@ -171,7 +171,7 @@ async def worker(data: Payload):
                             "keepUrlFragments": False,
                             "maxConcurrency": 200,
                             "maxCrawlDepth": 20,
-                            "maxCrawlPages": 50,
+                            "maxCrawlPages": 2500,
                             "maxRequestRetries": 3,
                             "maxScrollHeightPixels": 20000,
                             "maxSessionRotations": 10,
@@ -197,8 +197,7 @@ async def worker(data: Payload):
                                 }
                             ],
                             "storeSkippedUrls": False,
-                            "useSitemaps": True,
-                            "maxCrawlPages": 1000
+                            "useSitemaps": True
                         }
                     )
                     
