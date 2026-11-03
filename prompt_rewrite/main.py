@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 import os
 from dotenv import load_dotenv
 import asyncio
+import logging
 import asyncpg 
 from openrouter import OpenRouter
 
@@ -15,6 +16,7 @@ DB_POOL_MAX_SIZE = int(os.getenv("DB_POOL_MAX_SIZE", "2"))
 
 
 db_pool = None
+log = logging.getLogger(__name__)
 
 class Payload(BaseModel):
     action: str
@@ -47,6 +49,14 @@ app = FastAPI(lifespan=lifespan)
 async def get_connection():
     async with db_pool.acquire() as connection:
         yield connection
+
+
+async def unlock_configuration(connection, company_name):
+    await connection.execute('''
+        UPDATE ai_persona_config
+        SET is_locked = false
+        WHERE company_name = $1
+    ''', company_name)
 
 
 async def rewrite_instructions(service_prompt, user_input):
@@ -89,6 +99,7 @@ async def main(data: Payload, connection = Depends(get_connection)):
                 await asyncio.sleep(5)
     except TimeoutError as error:
         raise HTTPException(status_code=409, detail="AI configuration is busy or unavailable") from error
+    lock_released = False
     try:
         row = await connection.fetchrow('''
             SELECT learned_instructions, hard_rules
@@ -179,31 +190,35 @@ async def main(data: Payload, connection = Depends(get_connection)):
         
         learned_instructions = await rewrite_instructions(service_prompt, user_input)
 
-        await connection.execute('''
+        # Instructions, feedback status and unlock must commit together. A later
+        # write failure must not leave instructions changed with unapplied feedback.
+        async with connection.transaction():
+            await connection.execute('''
         UPDATE ai_persona_config
         SET learned_instructions = $1                             
         WHERE company_name = $2
-        ''', learned_instructions, data.companyName)
+            ''', learned_instructions, data.companyName)
 
-        if data.action == "delete":
-            await connection.execute('''
+            if data.action == "delete":
+                await connection.execute('''
         DELETE
         FROM ai_feedback                                                                  
         WHERE id = $1
-        ''', data.feedbackId)
-        else:
-            await connection.execute('''
+                ''', data.feedbackId)
+            else:
+                await connection.execute('''
         UPDATE ai_feedback
         SET status = 'applied'
         WHERE id = $1                                                                
-        ''', data.feedbackId)
-            
+                ''', data.feedbackId)
+            await unlock_configuration(connection, data.companyName)
+        lock_released = True
     finally:
-        await connection.execute('''
-        UPDATE ai_persona_config
-        SET is_locked = false
-        WHERE company_name = $1
-        ''', data.companyName)
+        if not lock_released:
+            try:
+                await unlock_configuration(connection, data.companyName)
+            except Exception:
+                log.exception("Could not release AI configuration lock")
         
     return {"status": 200}
 

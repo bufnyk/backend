@@ -102,12 +102,35 @@ class ChatEndpointTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_logger_posts_to_existing_error_endpoint(self):
         http_client = AsyncMock()
+        http_client.post.return_value = httpx.Response(200, request=httpx.Request("POST", "http://log-error_container:8000/log-error"))
         with patch.object(main, "httpx_client", http_client):
             await self.original_logger("error", "trace")
         http_client.post.assert_awaited_once_with(
             "http://log-error_container:8000/log-error",
             json={"app_name": "chatbot", "error_message": "error", "traceback": "trace"},
         )
+
+    async def test_empty_transport_error_is_named_in_all_chat_alerts(self):
+        main.generate_reply.side_effect = httpx.ReadTimeout("")
+        payloads = {
+            "/chatbot": self.payload,
+            "/test_chatbot": {"user_id": "user", "company_name": "company", "message": "Question", "message_history": []},
+            "/copilot": {"company_name": "company", "message": "Question", "command": "", "context_session_id": "session", "copilot_message_history": [], "active_conversation_history": []},
+        }
+        for endpoint, payload in payloads.items():
+            with self.subTest(endpoint=endpoint):
+                self.logger.reset_mock()
+                response = await self.client.post(endpoint, json=payload)
+                await asyncio.sleep(0)
+                self.assertEqual(response.status_code, 503)
+                self.assertIn("ReadTimeout", self.logger.await_args.args[0])
+
+    async def test_failed_alert_delivery_is_not_silently_accepted(self):
+        http_client = AsyncMock()
+        http_client.post.return_value = httpx.Response(503, request=httpx.Request("POST", "http://log-error_container:8000/log-error"))
+        with patch.object(main, "httpx_client", http_client), patch("builtins.print") as output:
+            await self.original_logger("error", "trace")
+        self.assertIn("HTTPStatusError", output.call_args.args[0])
 
     async def test_database_acquisition_has_a_bounded_wait(self):
         context = AsyncMock()

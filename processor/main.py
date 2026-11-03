@@ -47,6 +47,8 @@ CALLBACK_URL = "https://ntnoptppvhvezqbdbcyl.supabase.co/functions/v1/document-c
 CALLBACK_TIMEOUT = httpx.Timeout(60.0, connect=10.0)
 CALLBACK_RETRY_DELAYS = (2, 5)
 CLEANUP_BATCH_SIZE = 100
+DOWNLOAD_TIMEOUT = httpx.Timeout(60.0, connect=10.0)
+DOWNLOAD_RETRY_DELAYS = (2, 5)
 
 
 def describe_error(stage, error):
@@ -105,6 +107,26 @@ async def cleanup_vectors(row):
             .in_("id", [item["id"] for item in result.data]).execute()
         )
 
+
+async def download_batch(item):
+    for attempt in range(len(DOWNLOAD_RETRY_DELAYS) + 1):
+        try:
+            response = await client.get(
+                f"https://api.apify.com/v2/datasets/{item.datasetId}/items?limit={item.limit}&offset={item.offset}",
+                timeout=DOWNLOAD_TIMEOUT,
+            )
+            response.raise_for_status()
+            return response.json()
+        except (httpx.TransportError, httpx.HTTPStatusError) as error:
+            if (
+                isinstance(error, httpx.HTTPStatusError)
+                and error.response.status_code != 429
+                and error.response.status_code < 500
+            ) or attempt == len(DOWNLOAD_RETRY_DELAYS):
+                raise
+            log.warning("Apify download batch=%s failed (%s); retrying", item.batchNumber, type(error).__name__)
+            await asyncio.sleep(DOWNLOAD_RETRY_DELAYS[attempt])
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global co
@@ -138,9 +160,7 @@ async def worker(data):
 
             documents = []
             stage = f"Apify download batch={item.batchNumber} offset={item.offset}"
-            response = await client.get(f"https://api.apify.com/v2/datasets/{item.datasetId}/items?limit={item.limit}&offset={item.offset}")
-            response.raise_for_status()
-            payload = response.json()
+            payload = await download_batch(item)
             stage = f"splitting batch={item.batchNumber}"
             
             for element in payload:

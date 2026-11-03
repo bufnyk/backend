@@ -16,6 +16,7 @@ import cohere
 from supabase import create_async_client
 from contextlib import asynccontextmanager
 import traceback 
+import logging
 
 load_dotenv()
 PSTG_URL = os.getenv("PSTG_URL")
@@ -37,6 +38,92 @@ client = None
 co = None
 sb = None
 db_pool = None
+log = logging.getLogger(__name__)
+CALLBACK_URL = "https://ntnoptppvhvezqbdbcyl.supabase.co/functions/v1/document-callback"
+CALLBACK_TIMEOUT = httpx.Timeout(60.0, connect=10.0)
+CALLBACK_RETRY_DELAYS = (2, 5)
+CLEANUP_BATCH_SIZE = 100
+DOWNLOAD_TIMEOUT = httpx.Timeout(60.0, connect=10.0)
+DOWNLOAD_RETRY_DELAYS = (2, 5)
+
+
+def describe_error(stage, error):
+    if isinstance(error, httpx.HTTPStatusError):
+        # Download and Apify URLs can contain credentials in their query strings.
+        url = error.request.url
+        detail = f"HTTP {error.response.status_code} from {url.host}{url.path}"
+    else:
+        detail = str(error) or "exception has no message"
+    return f"{stage}: {type(error).__name__}: {detail}"
+
+
+async def send_callback(payload):
+    """Report the outcome without rolling back an already completed import."""
+    for attempt in range(len(CALLBACK_RETRY_DELAYS) + 1):
+        try:
+            response = await client.post(
+                CALLBACK_URL, headers=headers, json=payload, timeout=CALLBACK_TIMEOUT,
+            )
+            response.raise_for_status()
+            result = response.json()
+            if not isinstance(result, dict) or result.get("success") is not True:
+                raise ValueError("Callback did not confirm success")
+            if result.get("status") != payload["status"]:
+                raise ValueError(
+                    f"Callback returned status {result.get('status')!r}; "
+                    f"expected {payload['status']!r}"
+                )
+            return True
+        except Exception as error:
+            retryable = isinstance(error, httpx.TransportError) or (
+                isinstance(error, httpx.HTTPStatusError)
+                and (error.response.status_code == 429 or 500 <= error.response.status_code < 600)
+            )
+            message = describe_error(
+                f"callback {payload['status']} document_id={payload['document_id']} "
+                f"attempt={attempt + 1}", error,
+            )
+            if retryable and attempt < len(CALLBACK_RETRY_DELAYS):
+                log.warning("%s; retrying", message)
+                await asyncio.sleep(CALLBACK_RETRY_DELAYS[attempt])
+                continue
+            log.exception("%s; callback requires reconciliation; no rollback triggered", message)
+            await logger(message, traceback.format_exc())
+            return False
+
+
+async def cleanup_vectors(metadata):
+    """Keep each DELETE small and restrict it to this company and file."""
+    while True:
+        result = await (
+            sb.table("documents").select("id")
+            .eq("company_name", metadata.company_name).eq("file_hash", metadata.file_hash)
+            .order("id").limit(CLEANUP_BATCH_SIZE).execute()
+        )
+        if not result.data:
+            return
+        await (
+            sb.table("documents").delete()
+            .eq("company_name", metadata.company_name).eq("file_hash", metadata.file_hash)
+            .in_("id", [item["id"] for item in result.data]).execute()
+        )
+
+
+async def download_document(url):
+    for attempt in range(len(DOWNLOAD_RETRY_DELAYS) + 1):
+        try:
+            response = await client.get(url, follow_redirects=True, timeout=DOWNLOAD_TIMEOUT)
+            response.raise_for_status()
+            return response
+        except (httpx.TransportError, httpx.HTTPStatusError) as error:
+            if (
+                isinstance(error, httpx.HTTPStatusError)
+                and error.response.status_code != 429
+                and error.response.status_code < 500
+            ) or attempt == len(DOWNLOAD_RETRY_DELAYS):
+                raise
+            log.warning("Document download failed (%s); retrying", type(error).__name__)
+            await asyncio.sleep(DOWNLOAD_RETRY_DELAYS[attempt])
 
 
 class Metadata(BaseModel):
@@ -92,9 +179,12 @@ async def main(data: Payload, task: BackgroundTasks):
     return {"status": "started"}
 
 async def worker(data: Payload):
+    callback_payload = None
+    stage = "starting import"
     async with db_pool.acquire() as connection:
         try:
             if data.event == "url.scan":
+                stage = "waiting for crawl capacity"
                 while True:
                     scan_num = await connection.fetchval('''
                         SELECT COUNT(*)::integer
@@ -106,9 +196,11 @@ async def worker(data: Payload):
 
                     await asyncio.sleep(60)
 
+                stage = "starting Apify crawl"
                 if data.single_page_only:
                     r = await client.post(
                         f"https://api.apify.com/v2/acts/apify~website-content-crawler/runs?token={APIFY}&memory=4096&webhooks=W3siZXZlbnRUeXBlcyI6WyJBQ1RPUi5SVU4uU1VDQ0VFREVEIl0sInJlcXVlc3RVcmwiOiJodHRwczovL244bi52ZWN0aXhhaS5jb20vd2ViaG9vay84MjQ0YWQxMy1kMjk3LTQ0MmUtODM3NS1iYTg0ODhjN2ViZDgifV0==",
+                        timeout=httpx.Timeout(60.0, connect=10.0),
                         json={
                             "aggressivePrune": False,
                             "blockMedia": True,
@@ -154,6 +246,7 @@ async def worker(data: Payload):
                     exluded_urls = globs(data.website_url, data.excluded_paths)
                     r = await client.post(
                         f"https://api.apify.com/v2/acts/apify~website-content-crawler/runs?token={APIFY}&build=0.3.82&memory=8192&webhooks=W3siZXZlbnRUeXBlcyI6WyJBQ1RPUi5SVU4uU1VDQ0VFREVEIl0sInJlcXVlc3RVcmwiOiJodHRwczovL244bi52ZWN0aXhhaS5jb20vd2ViaG9vay84MjQ0YWQxMy1kMjk3LTQ0MmUtODM3NS1iYTg0ODhjN2ViZDgifV0=",
+                        timeout=httpx.Timeout(60.0, connect=10.0),
                         json={
                             "aggressivePrune": False,
                             "blockMedia": True,
@@ -209,6 +302,7 @@ async def worker(data: Payload):
                 filename = data.metadata.original_filename
                 hash = data.metadata.file_hash
 
+                stage = f"saving crawl registration dataset_id={dataset_id}"
                 async with connection.transaction():
                     await connection.execute('''
                         INSERT INTO "apify_url-scraper"(company_name, dataset_id, document_id, file_name, hash)
@@ -223,8 +317,9 @@ async def worker(data: Payload):
             else:
                 if not data.file_url:
                     raise ValueError("file_url is required for document uploads")
-                r = await client.get(data.file_url, follow_redirects=True, timeout=60)
-                r.raise_for_status()
+                stage = "downloading document"
+                r = await download_document(data.file_url)
+                stage = "extracting document text"
                 extractor = DocumentExtractor(
                     client, OPENAI_API_KEY, DOCUMENT_OCR_MODEL, DOCUMENT_OCR_MIN_TEXT_CHARS,
                 )
@@ -232,6 +327,7 @@ async def worker(data: Payload):
                     r.content, data.metadata.original_filename,
                     data.metadata.mime_type or r.headers.get("content-type"),
                 )
+                stage = "splitting document text"
                 chunks = split_sections(sections)
                 if not chunks:
                     raise ValueError("Document contains no readable text")
@@ -239,6 +335,7 @@ async def worker(data: Payload):
                 vector_size = None
                 for i in range(0, len(chunks), 90):
                     batch = chunks[i: i + 90]
+                    stage = f"embedding chunk_offset={i}"
                     cohere_res = await co.embed (
                         texts=[chunk.text for chunk in batch],
                         input_type="search_document",
@@ -267,46 +364,65 @@ async def worker(data: Payload):
                         if chunk.page is not None:
                             metadata["page"] = chunk.page
                         final_list.append({"content": chunk.text, "metadata": metadata, "embedding": vector})
+                    stage = f"vector insert chunk_offset={i}"
                     await (
                         sb.table("documents_view")
                         .insert(final_list)
                         .execute()
                     )
                     await asyncio.sleep(0.5)
-                await client.post(
-                    "https://ntnoptppvhvezqbdbcyl.supabase.co/functions/v1/document-callback",
-                    headers=headers,
-                    json={
-                        "document_id": data.document_id,
-                        "status": "completed",
-                    }
-                )
+                callback_payload = {"document_id": data.document_id, "status": "completed"}
 
         except Exception as e:
-            await asyncio.sleep(5)
+            message = describe_error(f"document_id={data.document_id} {stage}", e)
+            log.exception("%s", message)
+            await logger(message, traceback.format_exc())
+            if (
+                data.event == "url.scan"
+                and stage.startswith(("starting Apify crawl", "saving crawl registration"))
+                and not (
+                    isinstance(e, httpx.HTTPStatusError)
+                    and 400 <= e.response.status_code < 500
+                    and e.response.status_code != 408
+                )
+            ):
+                # Starting a crawl is not idempotent: it may already be running.
+                # Preserve the document and require reconciliation, not a retry
+                # that might create another paid run or a false failed callback.
+                pending = f"Crawl launch needs reconciliation; no automatic retry. {message}"
+                log.error("%s", pending)
+                try:
+                    await connection.execute('''
+                        UPDATE document_uploads SET error_message = $1
+                        WHERE id = $2 AND status = 'processing';
+                    ''', pending, data.document_id)
+                except Exception as record_error:
+                    log.error("%s", describe_error("could not record uncertain crawl launch", record_error))
+                return
+            if data.event != "url.scan":
+                try:
+                    await cleanup_vectors(data.metadata)
+                except Exception as cleanup_error:
+                    cleanup_message = describe_error(
+                        f"document_id={data.document_id} vector cleanup", cleanup_error,
+                    )
+                    log.exception("%s", cleanup_message)
+                    await logger(cleanup_message, traceback.format_exc())
+                    message = f"{message}; {cleanup_message}"
+            callback_payload = {
+                "document_id": data.document_id,
+                "status": "failed",
+                "error": message,
+            }
 
-            asyncio.create_task(logger(str(e), traceback.format_exc()))
-
-            await (
-                sb.table("documents")
-                .delete()
-                .eq("file_hash", data.metadata.file_hash)
-                .execute()
-            )
-
-            await client.post(
-                "https://ntnoptppvhvezqbdbcyl.supabase.co/functions/v1/document-callback",
-                headers=headers,
-                json={
-                    "document_id": data.document_id,
-                    "status": "failed",
-                    "error": str(e)
-                }
-            )
+    # Release the database connection before retrying a callback. Its failure is
+    # separate from extraction/embedding and must never trigger vector cleanup.
+    if callback_payload is not None:
+        await send_callback(callback_payload)
 
 async def logger(error_string, traceback_string):
     try:
-        await client.post(
+        response = await client.post(
             "http://log-error_container:8000/log-error",
             json={
                 "app_name": "data_distributor",
@@ -314,5 +430,6 @@ async def logger(error_string, traceback_string):
                 "traceback": traceback_string,
             }
         )
+        response.raise_for_status()
     except Exception as e:
-        print(f"could not log the error {str(e)}")
+        log.error("%s", describe_error("could not deliver error alert", e))

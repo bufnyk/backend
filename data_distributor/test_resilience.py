@@ -21,15 +21,19 @@ class DocumentResilienceTests(unittest.IsolatedAsyncioTestCase):
         pool.acquire.return_value.__aenter__.return_value = self.connection
         self.http_client = AsyncMock()
         self.http_client.get.return_value = httpx.Response(200, content=b"Document text", request=httpx.Request("GET", "https://example.com/file"))
-        self.http_client.post.return_value = httpx.Response(201, json={"data": {"defaultDatasetId": "dataset"}}, request=httpx.Request("POST", "https://api.apify.com"))
+        async def post(url, **kwargs):
+            if "api.apify.com" in url:
+                return httpx.Response(201, json={"data": {"defaultDatasetId": "dataset"}}, request=httpx.Request("POST", url))
+            return httpx.Response(200, json={"success": True, "status": kwargs["json"]["status"]}, request=httpx.Request("POST", url))
+        self.http_client.post.side_effect = post
         self.supabase = Mock()
         self.insert = AsyncMock()
         self.supabase.table.return_value.insert.return_value.execute = self.insert
-        self.supabase.table.return_value.delete.return_value.eq.return_value.execute = AsyncMock()
+        self.cleanup = AsyncMock()
         self.cohere = SimpleNamespace(embed=AsyncMock(return_value=SimpleNamespace(
             embeddings=SimpleNamespace(float=[[0.1, 0.2]]),
         )))
-        for name, value in (("db_pool", pool), ("client", self.http_client), ("sb", self.supabase), ("co", self.cohere), ("logger", AsyncMock())):
+        for name, value in (("db_pool", pool), ("client", self.http_client), ("sb", self.supabase), ("co", self.cohere), ("logger", AsyncMock()), ("cleanup_vectors", self.cleanup)):
             patcher = patch.object(main, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -106,13 +110,13 @@ class DocumentResilienceTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(f"Page {index + 1} content.", row["content"])
         self.assert_callback_status("completed")
 
-    async def test_missing_embeddings_or_invalid_vectors_fail_and_delete_by_hash(self):
+    async def test_missing_embeddings_or_invalid_vectors_fail_and_request_cleanup(self):
         for vectors in ([], [[]], [[float("nan"), 0.2]], [[float("inf"), 0.2]]):
             with self.subTest(vectors=vectors):
                 self.cohere.embed.return_value = SimpleNamespace(embeddings=SimpleNamespace(float=vectors))
                 await main.worker(self.payload())
                 self.assert_callback_status("failed")
-                self.supabase.table.return_value.delete.return_value.eq.assert_called_with("file_hash", "hash")
+                self.cleanup.assert_awaited_with(self.payload().metadata)
         self.insert.assert_not_awaited()
 
     async def test_error_after_first_embedding_batch_removes_already_saved_chunks(self):
@@ -131,8 +135,7 @@ class DocumentResilienceTests(unittest.IsolatedAsyncioTestCase):
         await main.worker(self.payload())
         self.insert.assert_awaited_once()
         self.assertEqual(len(self.supabase.table.return_value.insert.call_args.args[0]), 90)
-        self.supabase.table.return_value.delete.return_value.eq.assert_called_once_with("file_hash", "hash")
-        self.supabase.table.return_value.delete.return_value.eq.return_value.execute.assert_awaited_once()
+        self.cleanup.assert_awaited_once_with(self.payload().metadata)
         self.assert_callback_status("failed")
 
     async def test_ocr_error_prevents_partial_document_from_being_embedded(self):
@@ -146,7 +149,7 @@ class DocumentResilienceTests(unittest.IsolatedAsyncioTestCase):
             await main.worker(self.payload("file.pdf", "application/pdf"))
         self.cohere.embed.assert_not_awaited()
         self.insert.assert_not_awaited()
-        self.supabase.table.return_value.delete.return_value.eq.assert_called_once_with("file_hash", "hash")
+        self.cleanup.assert_awaited_once_with(self.payload("file.pdf", "application/pdf").metadata)
         self.assert_callback_status("failed")
 
     async def test_apify_201_uses_separate_statements_in_one_transaction(self):

@@ -166,6 +166,44 @@ class ProcessorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Apify download", payload["error"])
         self.assertIn("HTTPStatusError", payload["error"])
 
+    async def test_later_batch_download_timeout_does_not_repeat_saved_embeddings(self):
+        response = self.http.get.return_value
+        self.http.get.side_effect = [response, httpx.ReadTimeout(""), response]
+        self.http.post.return_value = self.callback_response()
+        second = SimpleNamespace(datasetId="dataset", limit=150, offset=150, batchNumber=2, databaseRow=self.row)
+        with patch.object(main, "cleanup_vectors", AsyncMock()) as cleanup:
+            await main.worker([self.item, second])
+        cleanup.assert_not_awaited()
+        self.assertEqual(self.http.get.await_count, 3)
+        self.assertEqual(self.embed.await_count, 2)
+        self.assertEqual(self.database.table.return_value.insert.return_value.execute.await_count, 2)
+        self.http.post.assert_awaited_once()
+
+    async def test_dataset_download_retries_rate_limit_and_has_explicit_timeout(self):
+        response = self.http.get.return_value
+        self.http.get.side_effect = [httpx.Response(429, request=httpx.Request("GET", "https://api.apify.com")), response]
+        self.assertEqual(await main.download_batch(self.item), response.json())
+        self.assertEqual(self.http.get.await_count, 2)
+        self.assertEqual(self.http.get.await_args.kwargs["timeout"].read, 60)
+        self.assertEqual(self.http.get.await_args.kwargs["timeout"].connect, 10)
+
+    async def test_dataset_download_does_not_retry_permanent_rejection(self):
+        self.http.get.return_value = httpx.Response(401, request=httpx.Request("GET", "https://api.apify.com"))
+        with self.assertRaises(httpx.HTTPStatusError):
+            await main.download_batch(self.item)
+        self.http.get.assert_awaited_once()
+
+    async def test_exhausted_dataset_download_reports_a_real_import_failure(self):
+        self.http.get.side_effect = httpx.ReadTimeout("")
+        self.http.post.return_value = self.callback_response(body={"success": True, "status": "failed"})
+        with patch.object(main, "cleanup_vectors", AsyncMock()) as cleanup:
+            await main.worker([self.item])
+        cleanup.assert_awaited_once_with(self.row)
+        self.assertEqual(self.http.get.await_count, 3)
+        self.embed.assert_not_awaited()
+        self.assertEqual(self.http.post.await_args.kwargs["json"]["status"], "failed")
+        self.assertIn("ReadTimeout", self.http.post.await_args.kwargs["json"]["error"])
+
     async def test_cleanup_batches_are_scoped_to_company_and_hash(self):
         query = Mock()
         for method in ("select", "eq", "order", "limit", "delete", "in_"):

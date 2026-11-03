@@ -1,6 +1,6 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 
@@ -10,6 +10,7 @@ import main
 class FeedbackEndpointTests(unittest.IsolatedAsyncioTestCase):
     async def test_delete_feedback_over_http(self):
         connection = AsyncMock()
+        connection.transaction = Mock(return_value=AsyncMock())
         connection.fetchrow.return_value = {"learned_instructions": "Brak", "hard_rules": "Brak"}
 
         async def connection_override():

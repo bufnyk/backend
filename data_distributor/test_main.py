@@ -52,7 +52,7 @@ def mock_httpx_router(mocker):
             return mocker.Mock(status_code=200, json=lambda: {"data": {"defaultDatasetId": "dataset-123"}})
         
         elif "supabase.co/functions" in str(url):
-            return mocker.Mock(status_code=200)
+            return httpx.Response(200, json={"success": True, "status": kwargs["json"]["status"]}, request=httpx.Request("POST", str(url)))
             
         elif "log-error_container" in str(url):
             return mocker.Mock(status_code=200)
@@ -117,7 +117,7 @@ async def test_apify_send_success(mock_httpx_router, database, mocker):
 
 
 @pytest.mark.asyncio
-async def test_apify_send_failed_database_crash(mock_httpx_router, mock_supabase, database, mocker):
+async def test_apify_registration_failure_does_not_report_a_running_crawl_as_failed(mock_httpx_router, mock_supabase, database, mocker):
     mocker.patch("asyncio.sleep", new_callable=mocker.AsyncMock)
     
     # Symulujemy twardy błąd bazy danych w momencie próby zapisu
@@ -143,15 +143,12 @@ async def test_apify_send_failed_database_crash(mock_httpx_router, mock_supabase
     # 1. Sprawdzamy historię uderzeń do sieci
     called_urls = [str(call.args[0]) for call in mock_httpx_router.call_args_list]
     
-    # 2. Upewniamy się, że worker uderzył do endpointu z błędem
-    assert any("document-callback" in url for url in called_urls)
-    
-    # 3. Wyciągamy payload błędu wysłany do Supabase
-    error_call = [call for call in mock_httpx_router.call_args_list if "document-callback" in str(call.args[0])][0]
-    sent_json = error_call.kwargs["json"]
-    
-    assert sent_json["status"] == "failed"
-    assert "Krytyczny błąd bazy danych" in sent_json["error"]
+    # Apify accepted the run before registration failed. Do not report failed
+    # or repeat that non-idempotent start; retain an alert for reconciliation.
+    assert not any("document-callback" in url for url in called_urls)
+    assert sum("api.apify.com" in url for url in called_urls) == 1
+    alert = next(call for call in mock_httpx_router.call_args_list if "log-error_container" in str(call.args[0]))
+    assert "Krytyczny błąd bazy danych" in alert.kwargs["json"]["error_message"]
 
 
 

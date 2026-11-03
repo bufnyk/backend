@@ -538,7 +538,7 @@ async def chatbot_response(data: Chatbot, connection = Depends(get_connection)):
             "attachments_skipped": skipped_attachment_count,
         }
     except Exception as e:
-        asyncio.create_task(logger(str(e), traceback.format_exc()))
+        asyncio.create_task(logger(f"{type(e).__name__}: {str(e) or 'exception has no message'}", traceback.format_exc()))
         return JSONResponse(status_code=503, content={"message": CHAT_ERROR_MESSAGE, "error": True})
     
 @app.post("/test_chatbot")
@@ -572,7 +572,7 @@ async def test_chatbot_response(data: Test_Chatbot, connection = Depends(get_con
         '''
         return {"message": await generate_chat_reply(system_prompt, client_input, tools)}
     except Exception as e:
-        asyncio.create_task(logger(str(e), traceback.format_exc()))
+        asyncio.create_task(logger(f"{type(e).__name__}: {str(e) or 'exception has no message'}", traceback.format_exc()))
         return JSONResponse(status_code=503, content={"message": CHAT_ERROR_MESSAGE, "error": True})
 
 
@@ -623,13 +623,13 @@ async def copilot_response(data: Copilot, connection = Depends(get_connection)):
 
         return {"message": await generate_chat_reply(system_prompt, client_input, tools)}
     except Exception as e:
-        asyncio.create_task(logger(str(e), traceback.format_exc()))
+        asyncio.create_task(logger(f"{type(e).__name__}: {str(e) or 'exception has no message'}", traceback.format_exc()))
         return JSONResponse(status_code=503, content={"message": CHAT_ERROR_MESSAGE, "error": True})
 
 
 async def logger(error_string, traceback_string):
     try:
-        await httpx_client.post(
+        response = await httpx_client.post(
             "http://log-error_container:8000/log-error",
             json={
                 "app_name": "chatbot",
@@ -637,8 +637,9 @@ async def logger(error_string, traceback_string):
                 "traceback": traceback_string,
             }
         )
+        response.raise_for_status()
     except Exception as e:
-        print(f"could not log the error {str(e)}")
+        print(f"could not log the error {type(e).__name__}: {str(e) or 'exception has no message'}")
 
 def prompt_creator(prompt_type, company_context, persona, instructions, hard_rules, chat_setings):
     if prompt_type == "copilot":

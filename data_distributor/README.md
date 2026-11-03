@@ -2,8 +2,39 @@
 
 `POST /document` keeps the existing background worker, Cohere
 `embed-multilingual-v3.0` embeddings, Supabase storage and callbacks. A processing
-error deletes all stored fragments with the upload's `file_hash`, including any
-batches already written.
+error cleans up stored fragments with the upload's `file_hash` and company,
+including batches already written, using DELETE batches of at most 100 rows.
+Cleanup errors are included in the reported import error.
+
+Completion reporting runs separately from extraction and embedding and releases
+the database connection before making the callback. A timeout or rejected
+callback never rolls back successfully stored vectors or sends a contradictory
+`failed` status. Callbacks use a 60-second timeout (10 seconds to connect), up to
+three attempts, and 2- and 5-second retry delays for transport errors, HTTP 429,
+and HTTP 5xx. Both the HTTP status and JSON outcome must confirm success.
+Exhausted retries produce a local traceback and an alert with document ID,
+attempted status, and exception type; no persistent retry queue is created.
+
+After independently verifying that all vectors have been stored, rerun only the
+completion callback with:
+
+```sh
+docker compose exec -T data_distributor python retry_callback.py DOCUMENT_ID
+```
+
+This does not recreate missing vectors or files. The callback counts vectors and
+can perform document replacement; its positive-count check alone does not prove
+completeness. The command exits nonzero when reporting fails.
+Source file GET requests use a 60-second read/10-second connection timeout and up
+to three attempts for transient transport errors, HTTP 429 and HTTP 5xx. Retries
+finish before extraction or embedding starts; permanent HTTP errors are not retried.
+
+Apify crawl starts also have a 60-second timeout (10 seconds to connect), but are
+never retried automatically: a lost acknowledgement may hide an already running
+paid crawl. An ambiguous launch or registration failure retains the document's
+state, records a reconciliation error when possible, and alerts with the dataset
+ID if it was received. Only a definitive HTTP 4xx rejection (excluding 408) is
+reported as failed at this stage.
 
 ## PDF extraction and OCR
 

@@ -1,6 +1,6 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import main
 
@@ -12,6 +12,8 @@ def model_response(text="new instructions"):
 class FeedbackResilienceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.connection = AsyncMock()
+        self.transaction = AsyncMock()
+        self.connection.transaction = Mock(return_value=self.transaction)
         self.connection.fetchrow.side_effect = [
             {"is_locked": True}, {"learned_instructions": "old", "hard_rules": "rules"},
         ]
@@ -67,6 +69,30 @@ class FeedbackResilienceTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(RuntimeError):
             await main.main(self.payload, self.connection)
         self.assert_unlocked()
+
+    async def test_feedback_write_failure_rolls_back_the_instruction_update(self):
+        self.connection.execute.side_effect = [None, RuntimeError("feedback write failed"), None]
+        with self.assertRaisesRegex(RuntimeError, "feedback write failed"):
+            await main.main(self.payload, self.connection)
+        self.transaction.__aenter__.assert_awaited_once()
+        self.assertIs(self.transaction.__aexit__.await_args.args[0], RuntimeError)
+        self.assert_unlocked()
+
+    async def test_unlock_failure_rolls_back_both_updates_and_retries_unlock(self):
+        self.connection.execute.side_effect = [None, None, RuntimeError("unlock failed"), None]
+        with self.assertRaisesRegex(RuntimeError, "unlock failed"):
+            await main.main(self.payload, self.connection)
+        self.assertIs(self.transaction.__aexit__.await_args.args[0], RuntimeError)
+        self.assertEqual(self.connection.execute.await_count, 4)
+        self.assert_unlocked()
+
+    async def test_failed_unlock_does_not_mask_original_model_error(self):
+        self.send.side_effect = ValueError("invalid model output")
+        self.connection.execute.side_effect = RuntimeError("unlock unavailable")
+        with patch.object(main.log, "exception") as log:
+            with self.assertRaisesRegex(ValueError, "invalid model output"):
+                await main.main(self.payload, self.connection)
+        log.assert_called_once()
 
 
 if __name__ == "__main__":

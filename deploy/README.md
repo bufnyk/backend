@@ -59,6 +59,9 @@ service with the document ID, attempted status, exception type, and traceback.
 They never delete successfully stored vectors or send a contradictory `failed`.
 Import failures still clean up vectors, scoped by company and hash in batches of
 100, and include any cleanup failure in the reported error.
+Dataset GET requests use the same 60-second read/10-second connection limits and
+up to three attempts for transient transport errors, HTTP 429, and HTTP 5xx.
+Only the download is retried; batches already embedded and saved are not repeated.
 
 After confirming that an import's vectors are fully stored, its completion can
 be reconciled without downloading or embedding again:
@@ -76,3 +79,9 @@ use the document ID in the alert for manual reconciliation.
 Run processor regression tests from `processor/` with
 `venv/bin/python -m unittest discover -v`. They mock external services and do not
 create embeddings or modify a database.
+
+Feedback updates commit the learned instructions, feedback state and configuration
+unlock in one database transaction. If one write fails, earlier writes roll back;
+unlock cleanup cannot hide the original failure. Chat alerts include exception
+types, including transport exceptions with empty messages. The error handler
+retains full alerts locally and verifies Telegram's HTTP and JSON acknowledgements.
